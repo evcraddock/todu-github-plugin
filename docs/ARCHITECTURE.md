@@ -1,4 +1,4 @@
-# GitHub Sync Plugin Specification
+# Architecture
 
 ## Status
 
@@ -80,23 +80,28 @@ Key alignment decisions:
 - A todu project may have at most one GitHub binding.
 - A GitHub repo may have at most one todu binding.
 
-### Binding creation
+### Binding creation and management
 
-This spec assumes binding management is provided by a generic integration surface in core todu, with commands such as:
+This spec assumes binding management is provided by the generic integration surface in core todu, with commands such as:
 
 ```bash
-toduai integration connect github --project rott --repo evcraddock/rott
-toduai integration sync github
-toduai integration sync github --project rott
-toduai integration disconnect github --project rott
+toduai integration list --provider github
+toduai integration add --provider github --project rott --target-kind repository --target evcraddock/rott --strategy bidirectional
+toduai integration update <binding-id> --target-kind repository --target evcraddock/rott
+toduai integration set-strategy <binding-id> --strategy pull
+toduai integration enable <binding-id>
+toduai integration disable <binding-id>
+toduai integration remove <binding-id>
+toduai integration status
+toduai integration status <binding-id>
 ```
 
 Rules:
 
 - The target todu project must already exist.
-- `connect` creates a shared integration binding and immediately requests bootstrap sync.
-- If a binding already exists, replacement must require an explicit force-style flow.
-- `sync` runs across all matching GitHub bindings by default and may be scoped by project or repo.
+- GitHub bindings use `provider = github`, `targetKind = repository`, and `targetRef = owner/repo`.
+- `integration add` creates a shared integration binding and the authority daemon should pick it up for bootstrap and steady-state sync.
+- If a binding already exists, replacement must require an explicit update or replacement flow.
 - Integration bindings are intended to be created and managed from any machine, then consumed by the authority daemon running the GitHub plugin.
 
 ## Authentication and Configuration
@@ -123,23 +128,37 @@ GitHub repo/project bindings are stored as shared integration records in synced 
 Each shared binding should contain at minimum:
 
 - binding id
-- provider type (`github`)
-- GitHub owner
-- GitHub repo
-- todu project id
+- provider (`github`)
+- project id
+- target kind (`repository`)
+- target ref (`owner/repo`)
+- strategy (`bidirectional`, `pull`, `push`, or `none`)
 - enabled flag
 - created timestamp
 - updated timestamp
 
+The GitHub provider should interpret `targetRef` to derive the GitHub owner and repo.
+
+### Binding strategy
+
+This spec describes the full bidirectional GitHub behavior.
+
+When a binding uses another core-defined strategy:
+
+- `bidirectional`: apply the full behavior in this spec
+- `pull`: only GitHub-to-todu import behavior runs
+- `push`: only todu-to-GitHub export behavior runs
+- `none`: the binding remains visible but no sync work runs
+
 ### Local runtime state
 
-The GitHub plugin stores provider-specific execution state locally, keyed by shared binding id.
+The GitHub plugin stores provider-specific execution state locally, keyed by the host-supplied binding identity, typically `catalogId + bindingId`.
 
 That local runtime state includes at minimum:
 
-- last sync state
+- last local retry/backoff state
 - last successful cursor/checkpoint
-- retry/backoff state
+- local mapping/link state
 
 ## Sync Scope
 
@@ -176,7 +195,7 @@ evcraddock/rott#42
 
 In addition to `external_id`, the plugin stores local mapping data in its DB for:
 
-- shared binding id membership
+- binding identity membership
 - comment mirroring
 - sync checkpoints/cursors
 - last-seen external timestamps
@@ -448,16 +467,30 @@ A successful cycle resets retry state for that binding.
 
 ## Observability
 
-The plugin records provider runtime sync state in its local DB and logs.
+Observability is split between shared integration binding status and local provider runtime details.
 
-Minimum observable data per binding:
+### Shared binding status
 
+The authority daemon should publish the high-level runtime status for each binding through the core integration status model surfaced by `toduai integration status`.
+
+Minimum shared observable data per binding:
+
+- binding id
+- state (`running`, `idle`, `blocked`, or `error`)
+- authority id
 - last successful sync time
 - last attempted sync time
-- last error
+- last error summary
+- updated time
+
+### Local runtime details
+
+The plugin may additionally keep detailed provider runtime data in local DB state and logs, such as:
+
 - current retry/backoff state
 - last processed issue cursor/checkpoint
 - counts for created/updated/deleted items in the last cycle
+- provider-local diagnostics needed for debugging
 
 Logging should clearly identify:
 
@@ -475,16 +508,16 @@ The plugin-owned DB should contain logical tables or collections for at least:
 
 - `item_links`
 - `comment_links`
-- `binding_sync_state`
+- `binding_runtime_state`
 - `binding_errors`
 
-Shared GitHub integration bindings are owned by core todu synced state, not by the plugin DB. The plugin DB stores only runtime and mapping data keyed by binding id.
+Shared GitHub integration bindings and shared integration binding status are owned by core todu synced state, not by the plugin DB. The plugin DB stores only provider-local runtime and mapping data keyed by binding identity.
 
 Suggested contents:
 
 ### `item_links`
 
-- binding id
+- binding identity
 - todu task id
 - GitHub issue number
 - external id
@@ -493,7 +526,7 @@ Suggested contents:
 
 ### `comment_links`
 
-- binding id
+- binding identity
 - todu task id
 - todu comment id
 - GitHub issue number
@@ -501,42 +534,42 @@ Suggested contents:
 - last mirrored comment timestamp
 - deleted flag or tombstone bookkeeping as needed internally
 
-### `binding_sync_state`
+### `binding_runtime_state`
 
-- binding id
-- last attempted at
-- last successful at
-- last cursor/checkpoint
+- binding identity
+- last local cursor/checkpoint
 - retry attempt
 - next retry at
+- local runtime cleanup markers as needed
 
-## Manual Sync Command
+## Integration Lifecycle Semantics
 
-`toduai integration sync github` triggers an immediate sync cycle.
+### Add
 
-Behavior:
-
-- no args: sync all GitHub bindings
-- `--project <project>`: sync one binding scoped by project
-- `--repo <owner/repo>`: sync one binding scoped by repo
-
-## Connect and Disconnect Semantics
-
-### Connect
-
-`toduai integration connect github ...` must:
+`toduai integration add --provider github ...` must:
 
 1. validate project exists
-2. validate repo format
-3. validate binding uniqueness or require explicit replacement flow
-4. persist a shared integration binding in core todu state
-5. request bootstrap sync immediately
+2. validate `target-kind repository`
+3. validate `target owner/repo` format
+4. validate binding uniqueness or require an explicit update/replacement flow
+5. persist a shared integration binding in core todu state
+6. allow the authority daemon to pick it up for bootstrap and steady-state sync
 
-### Disconnect
+### Update
 
-`toduai integration disconnect github ...` removes the shared binding and stops future sync for it.
+`toduai integration update <binding-id> ...` updates the shared binding target metadata.
 
-Disconnect does not delete already-synced tasks, issues, or comments.
+### Strategy and enablement
+
+- `toduai integration set-strategy <binding-id> --strategy ...` changes the desired binding strategy.
+- `toduai integration enable <binding-id>` re-enables execution for a binding.
+- `toduai integration disable <binding-id>` disables execution while keeping the binding visible.
+
+### Remove
+
+`toduai integration remove <binding-id>` removes the shared binding and stops future sync for it.
+
+Removing a binding does not delete already-synced tasks, issues, or comments.
 
 ## Implementation Notes
 
@@ -548,9 +581,10 @@ The provider runtime should:
 
 - initialize GitHub client state from config
 - load active GitHub integration bindings from synced core todu state
-- maintain local runtime state per binding id
+- maintain local runtime state per binding identity
 - pull GitHub issues per binding
 - push todu changes per binding
+- honor the binding strategy supplied by the host
 - shut down cleanly with the daemon
 
 ### Integration control plane assumption
@@ -573,20 +607,18 @@ GitHub API limits should be handled through:
 - checkpoint-based incremental sync
 - minimal write amplification
 
-## Initial Implementation Tasks
+## Implementation Plan Documents
 
-A practical first implementation pass can be broken into these tasks:
+Implementation sequencing lives in `docs/plans/` so the architecture document can stay focused on stable design.
 
-1. Define and implement the core `integration` domain model in todu.
-2. Add generic CLI support for creating, listing, syncing, and disconnecting integrations.
-3. Expose synced integration bindings to daemon/plugin consumers.
-4. Scaffold the GitHub sync provider around the shared integration control plane.
-5. Implement GitHub task/issue bootstrap and durable task linking via `external_id`.
-6. Implement bidirectional field sync for title, body, status, priority, and labels.
-7. Implement local runtime storage for cursors, item links, comment links, retry state, and loop prevention.
-8. Implement bidirectional comment sync for create, edit, and delete behavior.
-9. Add sync scheduling, retry/backoff behavior, and logging/observability.
-10. Add end-to-end tests that cover bootstrap, steady-state sync, reopen/close transitions, label normalization, and comment mirroring.
+Current phase documents:
+
+1. `docs/plans/phase-1-provider-foundation.md`
+2. `docs/plans/phase-2-bootstrap-and-linking.md`
+3. `docs/plans/phase-3-field-sync.md`
+4. `docs/plans/phase-4-comment-sync.md`
+5. `docs/plans/phase-5-runtime-and-observability.md`
+6. `docs/plans/phase-6-test-coverage-and-hardening.md`
 
 ## Open Implementation Questions
 
@@ -596,20 +628,21 @@ These do not block the spec, but they should be made concrete during implementat
 - exact hidden marker format, if hidden markers are used
 - exact GitHub API client abstraction and pagination strategy
 - exact todu comment/task APIs used for delete detection and edit timestamps
-- whether `disconnect` should optionally preserve or remove plugin-local link metadata for historical audit/debugging
-- exact shape of the shared core integration binding record assumed by this spec
+- whether `toduai integration remove` should preserve or remove plugin-local link metadata for historical audit/debugging
+- whether provider-local runtime state should key by `bindingId` alone or by `catalogId + bindingId` in the final implementation
 
 ## Acceptance Criteria for v1
 
 A v1 implementation satisfies this spec when:
 
-1. a user can create one shared GitHub integration binding from one existing todu project to one GitHub repo
-2. bootstrap immediately imports open GitHub issues and exports active/inprogress/waiting todu tasks
-3. linked items receive `external_id = owner/repo#number`
-4. title/body/status/priority/labels sync bidirectionally according to the mapping rules
-5. GitHub assignees sync into todu, but not the reverse
-6. comments sync bidirectionally for create/edit/delete with strict 1:1 mirrored behavior
-7. status and priority labels normalize deterministically
-8. deletion maps to cancelation instead of hard deletion
-9. sync runs on a configurable polling interval with per-binding retry state
-10. shared binding state lives in core todu synced state, while provider runtime state lives in plugin-local storage and is observable through DB state plus logs
+1. a user can create one shared GitHub integration binding from one existing todu project to one GitHub repo using the generic integration management surface
+2. the binding uses `provider = github`, `targetKind = repository`, and `targetRef = owner/repo`
+3. bootstrap immediately imports open GitHub issues and exports active/inprogress/waiting todu tasks when strategy is `bidirectional`
+4. linked items receive `external_id = owner/repo#number`
+5. title/body/status/priority/labels sync according to the mapping rules and respect the binding strategy
+6. GitHub assignees sync into todu, but not the reverse
+7. comments sync bidirectionally for create/edit/delete with strict 1:1 mirrored behavior when the binding strategy includes both directions
+8. status and priority labels normalize deterministically
+9. deletion maps to cancelation instead of hard deletion
+10. sync runs on a configurable polling interval with per-binding retry state
+11. shared binding desired state and shared binding status live in core todu synced state, while provider runtime state lives in plugin-local storage and detailed diagnostics remain available through local DB state plus logs
