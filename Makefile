@@ -1,4 +1,7 @@
-.PHONY: dev dev-stop dev-status dev-logs dev-tail check pre-pr help
+DEV_CONFIG := ./config/dev.toduai.yaml
+DEV_CLI := toduai --config $(DEV_CONFIG)
+
+.PHONY: dev dev-stop dev-status dev-logs dev-tail dev-daemon-status dev-projects dev-integrations dev-cli check pre-pr help
 
 SOCKET := ./.overmind.sock
 
@@ -39,6 +42,19 @@ dev-tail: ## Show last 100 lines of logs (non-blocking)
 	else \
 		echo "Dev environment not running"; \
 	fi
+
+dev-daemon-status: ## Show isolated dev daemon status via toduai
+	$(DEV_CLI) daemon status
+
+dev-projects: ## List projects against the isolated dev daemon
+	$(DEV_CLI) project list
+
+dev-integrations: ## List integrations against the isolated dev daemon
+	$(DEV_CLI) integration list
+
+dev-cli: ## Run a toduai command against the isolated dev config (usage: make dev-cli CMD="daemon status")
+	@test -n "$(CMD)" || (echo "Usage: make dev-cli CMD=\"daemon status\"" && exit 1)
+	$(DEV_CLI) $(CMD)
 
 check: ## Run linting and tests
 	npm run lint && npm test

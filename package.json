@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:watch": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "lint": "eslint .",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",

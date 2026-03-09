@@ -26,3 +26,6 @@ coverage/
 
 # AI agent config
 .claude/
+
+# Local development runtime state
+.dev/

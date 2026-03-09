@@ -16,13 +16,30 @@ bun install
 
 ## How to Work on This Project
 
+### Local Dev Environment
+
+The repo uses an isolated local `toduai` development environment.
+
+- Dev config file: `config/dev.toduai.yaml`
+- Dev runtime data: `.dev/todu/data/`
+- Dev daemon socket: `.dev/todu/data/daemon.sock`
+
+This keeps local development separate from any normal `toduai` daemon already running on the machine.
+
+The `.dev/` runtime directory is intentionally gitignored.
+
 ### Start the Dev Environment
 
 ```bash
 make dev
 ```
 
-This starts all services defined in `Procfile.dev`. The command returns immediately (daemonized).
+This starts all services defined in `Procfile.dev` and returns immediately.
+
+Current services:
+
+- `build` - watches and rebuilds the plugin
+- `daemon` - runs an isolated local `toduai` daemon using `config/dev.toduai.yaml`
 
 ### View Logs
 
@@ -34,10 +51,37 @@ make dev-logs
 make dev-tail
 ```
 
-### Check Status
+### Check Process Status
 
 ```bash
 make dev-status
+```
+
+### Check Dev Daemon Status via CLI
+
+```bash
+make dev-daemon-status
+```
+
+### Run `toduai` Against the Dev Daemon
+
+```bash
+# Generic wrapper
+make dev-cli CMD="daemon status"
+make dev-cli CMD="project list"
+make dev-cli CMD="integration list"
+
+# Convenience targets
+make dev-projects
+make dev-integrations
+```
+
+You can also call the CLI directly:
+
+```bash
+toduai --config ./config/dev.toduai.yaml daemon status
+toduai --config ./config/dev.toduai.yaml project list
+toduai --config ./config/dev.toduai.yaml integration list
 ```
 
 ### Stop the Dev Environment
@@ -64,9 +108,11 @@ make pre-pr
 make help
 ```
 
-## Dev Environment Setup
+## Manual Setup Notes
 
-If `make dev` fails, the dev environment needs configuration. See `todu` task #2177 (`Set up dev environment`) for the follow-up setup work.
+- Copy `.env.example` to `.env` if you want local overrides such as `TODUAI_LOG_LEVEL`.
+- The dev environment is intentionally minimal and does not include an Automerge sync server or multi-machine simulation.
+- The daemon is isolated and ready for plugin development work. Actual GitHub provider loading will be added as the implementation tasks introduce the provider runtime.
 
 ## Starter Code
 
