@@ -7,6 +7,7 @@ import {
   type SyncProviderPullResult,
   type SyncProviderRegistration,
   type Task,
+  type TaskWithDetail,
 } from "@todu/core";
 
 import {
@@ -93,7 +94,7 @@ export function createGitHubSyncProvider(
       lastPullResult = null;
       lastPushResult = null;
     },
-    async pull(binding, project): Promise<SyncProviderPullResult> {
+    async pull(binding, _project): Promise<SyncProviderPullResult> {
       const parsedBinding = validateBinding(binding);
       if (binding.strategy === "none" || binding.strategy === "push") {
         lastPullResult = {
@@ -110,7 +111,6 @@ export function createGitHubSyncProvider(
         binding,
         owner: parsedBinding.owner,
         repo: parsedBinding.repo,
-        project,
         issueClient,
         linkStore,
       });
@@ -119,11 +119,12 @@ export function createGitHubSyncProvider(
         tasks: lastPullResult.tasks,
       };
     },
-    async push(binding, tasks, _project): Promise<void> {
+    async push(binding, tasks: TaskWithDetail[], _project): Promise<void> {
       const parsedBinding = validateBinding(binding);
       if (binding.strategy === "none" || binding.strategy === "pull") {
         lastPushResult = {
           createdIssues: [],
+          updatedIssues: [],
           createdLinks: [],
           taskUpdates: [],
         };
@@ -147,16 +148,18 @@ export function createGitHubSyncProvider(
         priority: normalizeTaskPriority(external.priority),
         projectId: project.id,
         labels: [...(external.labels ?? [])],
+        assignees: [...(external.assignees ?? [])],
         externalId: external.externalId,
         sourceUrl: external.sourceUrl,
         createdAt: external.createdAt ?? external.updatedAt ?? DEFAULT_TIMESTAMP,
         updatedAt: external.updatedAt ?? external.createdAt ?? DEFAULT_TIMESTAMP,
       };
     },
-    mapFromTask(task: Task): ExternalTask {
+    mapFromTask(task: TaskWithDetail): ExternalTask {
       return {
         externalId: task.externalId ?? String(task.id),
         title: task.title,
+        description: task.description,
         status: task.status,
         priority: task.priority,
         labels: [...task.labels],

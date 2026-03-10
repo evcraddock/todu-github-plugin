@@ -1,15 +1,24 @@
-import type { ExternalTask, IntegrationBinding, Project, Task } from "@todu/core";
+import type { ExternalTask, IntegrationBinding, TaskWithDetail } from "@todu/core";
 
 import type { GitHubIssue, GitHubIssueClient } from "@/github-client";
+import {
+  createGitHubIssueCreateFromTask,
+  createGitHubIssueUpdateFromTask,
+  mapGitHubIssueToExternalTask,
+} from "@/github-fields";
 import {
   createLinkFromIssue,
   createLinkFromTask,
   type GitHubItemLink,
   type GitHubItemLinkStore,
 } from "@/github-links";
-import { formatIssueExternalId, parseIssueExternalId } from "@/github-ids";
+import { parseIssueExternalId } from "@/github-ids";
 
-const TASK_BOOTSTRAP_EXPORT_STATUSES = new Set<Task["status"]>(["active", "inprogress", "waiting"]);
+const TASK_BOOTSTRAP_EXPORT_STATUSES = new Set<TaskWithDetail["status"]>([
+  "active",
+  "inprogress",
+  "waiting",
+]);
 
 export interface GitHubBootstrapImportResult {
   tasks: ExternalTask[];
@@ -17,13 +26,14 @@ export interface GitHubBootstrapImportResult {
 }
 
 export interface GitHubBootstrapTaskUpdate {
-  taskId: Task["id"];
+  taskId: TaskWithDetail["id"];
   externalId: string;
   sourceUrl?: string;
 }
 
 export interface GitHubBootstrapExportResult {
   createdIssues: GitHubIssue[];
+  updatedIssues: GitHubIssue[];
   createdLinks: GitHubItemLink[];
   taskUpdates: GitHubBootstrapTaskUpdate[];
 }
@@ -32,11 +42,10 @@ export async function bootstrapGitHubIssuesToTasks(input: {
   binding: IntegrationBinding;
   owner: string;
   repo: string;
-  project: Project;
   issueClient: GitHubIssueClient;
   linkStore: GitHubItemLinkStore;
 }): Promise<GitHubBootstrapImportResult> {
-  const issues = await input.issueClient.listOpenIssues({
+  const issues = await input.issueClient.listIssues({
     owner: input.owner,
     repo: input.repo,
   });
@@ -45,35 +54,22 @@ export async function bootstrapGitHubIssuesToTasks(input: {
   const createdLinks: GitHubItemLink[] = [];
 
   for (const issue of issues) {
-    if (issue.state !== "open" || issue.isPullRequest) {
+    if (issue.isPullRequest) {
       continue;
     }
 
     const existingLink = input.linkStore.getByIssueNumber(input.binding.id, issue.number);
-    if (existingLink) {
+    if (!existingLink && issue.state !== "open") {
       continue;
     }
 
-    const externalId = formatIssueExternalId({
-      owner: input.owner,
-      repo: input.repo,
-      issueNumber: issue.number,
-    });
+    if (!existingLink) {
+      const createdLink = createLinkFromIssue(input.binding, issue, input.owner, input.repo);
+      input.linkStore.save(createdLink);
+      createdLinks.push(createdLink);
+    }
 
-    tasks.push({
-      externalId,
-      title: issue.title,
-      description: issue.body,
-      labels: [...issue.labels],
-      sourceUrl: issue.sourceUrl,
-      createdAt: issue.createdAt,
-      updatedAt: issue.updatedAt,
-      raw: issue,
-    });
-
-    const createdLink = createLinkFromIssue(input.binding, issue, input.owner, input.repo);
-    input.linkStore.save(createdLink);
-    createdLinks.push(createdLink);
+    tasks.push(mapGitHubIssueToExternalTask(issue));
   }
 
   return {
@@ -86,21 +82,40 @@ export async function bootstrapTasksToGitHubIssues(input: {
   binding: IntegrationBinding;
   owner: string;
   repo: string;
-  tasks: Task[];
+  tasks: TaskWithDetail[];
   issueClient: GitHubIssueClient;
   linkStore: GitHubItemLinkStore;
 }): Promise<GitHubBootstrapExportResult> {
   const createdIssues: GitHubIssue[] = [];
+  const updatedIssues: GitHubIssue[] = [];
   const createdLinks: GitHubItemLink[] = [];
   const taskUpdates: GitHubBootstrapTaskUpdate[] = [];
 
   for (const task of input.tasks) {
-    if (!TASK_BOOTSTRAP_EXPORT_STATUSES.has(task.status)) {
-      continue;
-    }
-
     const existingLink = input.linkStore.getByTaskId(input.binding.id, task.id);
     if (existingLink) {
+      const existingIssue = await input.issueClient.getIssue(
+        {
+          owner: input.owner,
+          repo: input.repo,
+        },
+        existingLink.issueNumber
+      );
+      task.externalId = existingLink.externalId;
+      task.sourceUrl = existingIssue?.sourceUrl ?? task.sourceUrl;
+
+      if (shouldPushTaskUpdate(task, existingIssue)) {
+        const updatedIssue = await input.issueClient.updateIssue(
+          {
+            owner: input.owner,
+            repo: input.repo,
+          },
+          existingLink.issueNumber,
+          createGitHubIssueUpdateFromTask(task)
+        );
+        task.sourceUrl = updatedIssue.sourceUrl;
+        updatedIssues.push(updatedIssue);
+      }
       continue;
     }
 
@@ -121,6 +136,30 @@ export async function bootstrapTasksToGitHubIssues(input: {
       );
       input.linkStore.save(createdLink);
       createdLinks.push(createdLink);
+
+      const existingIssue = await input.issueClient.getIssue(
+        {
+          owner: input.owner,
+          repo: input.repo,
+        },
+        matchingExternalId.issueNumber
+      );
+      if (shouldPushTaskUpdate(task, existingIssue)) {
+        const updatedIssue = await input.issueClient.updateIssue(
+          {
+            owner: input.owner,
+            repo: input.repo,
+          },
+          matchingExternalId.issueNumber,
+          createGitHubIssueUpdateFromTask(task)
+        );
+        task.sourceUrl = updatedIssue.sourceUrl;
+        updatedIssues.push(updatedIssue);
+      }
+      continue;
+    }
+
+    if (!TASK_BOOTSTRAP_EXPORT_STATUSES.has(task.status)) {
       continue;
     }
 
@@ -129,7 +168,7 @@ export async function bootstrapTasksToGitHubIssues(input: {
         owner: input.owner,
         repo: input.repo,
       },
-      task
+      createGitHubIssueCreateFromTask(task)
     );
 
     createdIssues.push(createdIssue);
@@ -154,6 +193,7 @@ export async function bootstrapTasksToGitHubIssues(input: {
 
   return {
     createdIssues,
+    updatedIssues,
     createdLinks,
     taskUpdates,
   };
@@ -163,8 +203,23 @@ function createIssueSourceUrl(owner: string, repo: string, issueNumber: number):
   return `https://github.com/${owner}/${repo}/issues/${issueNumber}`;
 }
 
+function shouldPushTaskUpdate(task: TaskWithDetail, issue: GitHubIssue | null): boolean {
+  if (!issue?.updatedAt) {
+    return true;
+  }
+
+  const taskUpdatedAt = Date.parse(task.updatedAt);
+  const issueUpdatedAt = Date.parse(issue.updatedAt);
+
+  if (Number.isNaN(taskUpdatedAt) || Number.isNaN(issueUpdatedAt)) {
+    return true;
+  }
+
+  return taskUpdatedAt >= issueUpdatedAt;
+}
+
 function getMatchingExternalId(
-  task: Task,
+  task: TaskWithDetail,
   owner: string,
   repo: string
 ): { issueNumber: number } | null {

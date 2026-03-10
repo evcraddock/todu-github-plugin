@@ -44,6 +44,20 @@ export {
   type GitHubItemLinkStore,
 } from "@/github-links";
 export {
+  createGitHubIssueCreateFromTask,
+  createGitHubIssueUpdateFromTask,
+  createGitHubPriorityFromTask,
+  createGitHubStatusFromTask,
+  getNormalGitHubLabels,
+  mapGitHubIssueToExternalTask,
+  mergeGitHubLabels,
+  normalizeGitHubIssuePriority,
+  normalizeGitHubIssueStatus,
+  type GitHubFieldMapping,
+  type NormalizedGitHubPriority,
+  type NormalizedGitHubStatus,
+} from "@/github-fields";
+export {
   bootstrapGitHubIssuesToTasks,
   bootstrapTasksToGitHubIssues,
   type GitHubBootstrapExportResult,

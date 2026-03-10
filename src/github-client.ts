@@ -1,13 +1,13 @@
-import type { Task } from "@todu/core";
-
 import type { GitHubRepositoryTarget } from "@/github-binding";
 
 export interface GitHubIssue {
   number: number;
+  externalId: string;
   title: string;
   body?: string;
   state: "open" | "closed";
   labels: string[];
+  assignees: string[];
   sourceUrl?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -17,12 +17,26 @@ export interface GitHubIssue {
 export interface CreateGitHubIssueInput {
   title: string;
   body?: string;
+  state?: GitHubIssue["state"];
+  labels?: string[];
+}
+
+export interface UpdateGitHubIssueInput {
+  title?: string;
+  body?: string;
+  state?: GitHubIssue["state"];
   labels?: string[];
 }
 
 export interface GitHubIssueClient {
-  listOpenIssues(target: GitHubRepositoryTarget): Promise<GitHubIssue[]>;
-  createIssue(target: GitHubRepositoryTarget, task: Task): Promise<GitHubIssue>;
+  listIssues(target: GitHubRepositoryTarget): Promise<GitHubIssue[]>;
+  getIssue(target: GitHubRepositoryTarget, issueNumber: number): Promise<GitHubIssue | null>;
+  createIssue(target: GitHubRepositoryTarget, input: CreateGitHubIssueInput): Promise<GitHubIssue>;
+  updateIssue(
+    target: GitHubRepositoryTarget,
+    issueNumber: number,
+    input: UpdateGitHubIssueInput
+  ): Promise<GitHubIssue>;
 }
 
 export interface InMemoryGitHubIssueClient extends GitHubIssueClient {
@@ -45,50 +59,86 @@ export function createInMemoryGitHubIssueClient(): InMemoryGitHubIssueClient {
     issuesByRepository.set(getRepositoryKey(target), issues);
   };
 
+  const cloneIssue = (issue: GitHubIssue): GitHubIssue => ({
+    ...issue,
+    labels: [...issue.labels],
+    assignees: [...issue.assignees],
+  });
+
+  const createIssueSourceUrl = (target: GitHubRepositoryTarget, issueNumber: number): string =>
+    `https://github.com/${target.owner}/${target.repo}/issues/${issueNumber}`;
+
   return {
     seedIssues(target, issues): void {
       setIssues(
         target,
-        issues.map((issue) => ({
-          ...issue,
-          labels: [...issue.labels],
-        }))
+        issues.map((issue) =>
+          cloneIssue({
+            ...issue,
+            externalId: issue.externalId ?? `${target.owner}/${target.repo}#${issue.number}`,
+            assignees: [...(issue.assignees ?? [])],
+          })
+        )
       );
     },
     snapshotIssues(target): GitHubIssue[] {
-      return getIssues(target).map((issue) => ({
-        ...issue,
-        labels: [...issue.labels],
-      }));
+      return getIssues(target).map(cloneIssue);
     },
-    async listOpenIssues(target): Promise<GitHubIssue[]> {
+    async listIssues(target): Promise<GitHubIssue[]> {
       return getIssues(target)
-        .filter((issue) => issue.state === "open" && !issue.isPullRequest)
-        .map((issue) => ({
-          ...issue,
-          labels: [...issue.labels],
-        }));
+        .filter((issue) => !issue.isPullRequest)
+        .map(cloneIssue);
     },
-    async createIssue(target, task): Promise<GitHubIssue> {
+    async getIssue(target, issueNumber): Promise<GitHubIssue | null> {
+      return getIssues(target)
+        .filter((issue) => !issue.isPullRequest)
+        .find((issue) => issue.number === issueNumber)
+        ? cloneIssue(
+            getIssues(target).find((issue) => issue.number === issueNumber && !issue.isPullRequest)!
+          )
+        : null;
+    },
+    async createIssue(target, input): Promise<GitHubIssue> {
       const issues = getIssues(target);
       const nextIssueNumber = issues.reduce((max, issue) => Math.max(max, issue.number), 0) + 1;
-      const timestamp = task.updatedAt;
+      const timestamp = new Date().toISOString();
       const createdIssue: GitHubIssue = {
         number: nextIssueNumber,
-        title: task.title,
-        body: undefined,
-        state: "open",
-        labels: [],
-        sourceUrl: `https://github.com/${target.owner}/${target.repo}/issues/${nextIssueNumber}`,
+        externalId: `${target.owner}/${target.repo}#${nextIssueNumber}`,
+        title: input.title,
+        body: input.body,
+        state: input.state ?? "open",
+        labels: [...(input.labels ?? [])],
+        assignees: [],
+        sourceUrl: createIssueSourceUrl(target, nextIssueNumber),
         createdAt: timestamp,
         updatedAt: timestamp,
       };
 
       setIssues(target, [...issues, createdIssue]);
-      return {
-        ...createdIssue,
-        labels: [...createdIssue.labels],
+      return cloneIssue(createdIssue);
+    },
+    async updateIssue(target, issueNumber, input): Promise<GitHubIssue> {
+      const issues = getIssues(target);
+      const index = issues.findIndex((issue) => issue.number === issueNumber);
+      if (index === -1) {
+        throw new Error(`GitHub issue not found: ${target.owner}/${target.repo}#${issueNumber}`);
+      }
+
+      const existingIssue = issues[index];
+      const updatedIssue: GitHubIssue = {
+        ...existingIssue,
+        title: input.title ?? existingIssue.title,
+        body: input.body ?? existingIssue.body,
+        state: input.state ?? existingIssue.state,
+        labels: input.labels ? [...input.labels] : [...existingIssue.labels],
+        updatedAt: new Date().toISOString(),
       };
+
+      const nextIssues = [...issues];
+      nextIssues[index] = updatedIssue;
+      setIssues(target, nextIssues);
+      return cloneIssue(updatedIssue);
     },
   };
 }
