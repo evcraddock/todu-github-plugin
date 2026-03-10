@@ -1,8 +1,10 @@
 import {
   createIntegrationBindingId,
   createProjectId,
+  createTaskId,
   type IntegrationBinding,
   type Project,
+  type Task,
 } from "@todu/core";
 import { describe, expect, it } from "vitest";
 
@@ -10,11 +12,15 @@ import {
   GITHUB_PROVIDER_NAME,
   GITHUB_REPOSITORY_TARGET_KIND,
   GitHubBindingValidationError,
+  GitHubExternalIdError,
   GitHubProviderConfigError,
   createGitHubSyncProvider,
+  createInMemoryGitHubIssueClient,
+  formatIssueExternalId,
   loadGitHubProviderSettings,
   parseGitHubBinding,
   parseGitHubRepositoryTargetRef,
+  parseIssueExternalId,
 } from "@/index";
 
 describe("parseGitHubRepositoryTargetRef", () => {
@@ -36,6 +42,32 @@ describe("parseGitHubRepositoryTargetRef", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(GitHubBindingValidationError);
       expect((error as GitHubBindingValidationError).code).toBe("INVALID_TARGET_REF");
+    }
+  });
+});
+
+describe("parseIssueExternalId", () => {
+  it("parses owner/repo#number external IDs", () => {
+    expect(parseIssueExternalId("evcraddock/todu-github-plugin#42")).toEqual({
+      owner: "evcraddock",
+      repo: "todu-github-plugin",
+      issueNumber: 42,
+    });
+  });
+
+  it("rejects malformed external IDs", () => {
+    expect(() => parseIssueExternalId("evcraddock/todu-github-plugin")).toThrowError(
+      /expected owner\/repo#number format/
+    );
+    expect(() => parseIssueExternalId("evcraddock/todu-github-plugin#0")).toThrowError(
+      /issue number must be a positive integer/
+    );
+
+    try {
+      parseIssueExternalId("bad-value");
+      throw new Error("Expected external ID parsing to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(GitHubExternalIdError);
     }
   });
 });
@@ -87,26 +119,254 @@ describe("loadGitHubProviderSettings", () => {
 });
 
 describe("createGitHubSyncProvider", () => {
-  it("initializes, validates bindings, and shuts down cleanly", async () => {
-    const provider = createGitHubSyncProvider();
+  it("initializes, validates bindings, bootstraps open GitHub issues, and shuts down cleanly", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues({ owner: "evcraddock", repo: "todu-github-plugin" }, [
+      {
+        number: 1,
+        title: "Open issue",
+        body: "Imported from GitHub",
+        state: "open",
+        labels: ["bug"],
+        sourceUrl: "https://github.com/evcraddock/todu-github-plugin/issues/1",
+        createdAt: "2026-03-10T00:00:00.000Z",
+        updatedAt: "2026-03-10T00:00:00.000Z",
+      },
+      {
+        number: 2,
+        title: "Pull request",
+        body: "Should be ignored",
+        state: "open",
+        labels: [],
+        isPullRequest: true,
+      },
+      {
+        number: 3,
+        title: "Closed issue",
+        body: "Should be ignored",
+        state: "closed",
+        labels: [],
+      },
+    ]);
+
+    const provider = createGitHubSyncProvider({ issueClient });
     const project = createProject();
     const binding = createBinding();
 
     await expect(provider.pull(binding, project)).rejects.toThrowError(/not initialized/);
 
     await provider.initialize({ settings: { token: "secret-token" } });
+
+    const pullResult = await provider.pull(binding, project);
+    expect(pullResult.tasks).toEqual([
+      {
+        externalId: "evcraddock/todu-github-plugin#1",
+        title: "Open issue",
+        description: "Imported from GitHub",
+        labels: ["bug"],
+        sourceUrl: "https://github.com/evcraddock/todu-github-plugin/issues/1",
+        createdAt: "2026-03-10T00:00:00.000Z",
+        updatedAt: "2026-03-10T00:00:00.000Z",
+        raw: {
+          number: 1,
+          title: "Open issue",
+          body: "Imported from GitHub",
+          state: "open",
+          labels: ["bug"],
+          sourceUrl: "https://github.com/evcraddock/todu-github-plugin/issues/1",
+          createdAt: "2026-03-10T00:00:00.000Z",
+          updatedAt: "2026-03-10T00:00:00.000Z",
+        },
+      },
+    ]);
     expect(provider.getState()).toMatchObject({
       initialized: true,
       settings: { token: "secret-token" },
+      itemLinks: [
+        {
+          bindingId: binding.id,
+          taskId: createTaskId("github:evcraddock/todu-github-plugin#1"),
+          issueNumber: 1,
+          externalId: "evcraddock/todu-github-plugin#1",
+        },
+      ],
     });
 
-    await expect(provider.pull(binding, project)).resolves.toEqual({ tasks: [] });
-    await expect(provider.push(binding, [], project)).resolves.toBeUndefined();
-
     await expect(provider.shutdown()).resolves.toBeUndefined();
-    expect(provider.getState()).toEqual({ initialized: false, settings: null });
+    expect(provider.getState()).toEqual({
+      initialized: false,
+      settings: null,
+      itemLinks: [
+        {
+          bindingId: binding.id,
+          taskId: createTaskId("github:evcraddock/todu-github-plugin#1"),
+          issueNumber: 1,
+          externalId: "evcraddock/todu-github-plugin#1",
+        },
+      ],
+      lastPullResult: null,
+      lastPushResult: null,
+    });
+  });
 
-    await expect(provider.shutdown()).resolves.toBeUndefined();
+  it("bootstraps active/inprogress/waiting tasks into GitHub and ignores done/canceled", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    const provider = createGitHubSyncProvider({ issueClient });
+    const binding = createBinding();
+    const project = createProject();
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    await provider.push(
+      binding,
+      [
+        createTask({ id: "task-1", title: "Active task", status: "active" }),
+        createTask({ id: "task-2", title: "In progress task", status: "inprogress" }),
+        createTask({ id: "task-3", title: "Waiting task", status: "waiting" }),
+        createTask({ id: "task-4", title: "Done task", status: "done" }),
+        createTask({ id: "task-5", title: "Canceled task", status: "canceled" }),
+      ],
+      project
+    );
+
+    expect(
+      issueClient.snapshotIssues({ owner: "evcraddock", repo: "todu-github-plugin" })
+    ).toMatchObject([
+      { number: 1, title: "Active task", state: "open" },
+      { number: 2, title: "In progress task", state: "open" },
+      { number: 3, title: "Waiting task", state: "open" },
+    ]);
+    expect(provider.getState().lastPushResult).toMatchObject({
+      createdIssues: [{ number: 1 }, { number: 2 }, { number: 3 }],
+      taskUpdates: [
+        {
+          taskId: createTaskId("task-1"),
+          externalId: "evcraddock/todu-github-plugin#1",
+        },
+        {
+          taskId: createTaskId("task-2"),
+          externalId: "evcraddock/todu-github-plugin#2",
+        },
+        {
+          taskId: createTaskId("task-3"),
+          externalId: "evcraddock/todu-github-plugin#3",
+        },
+      ],
+    });
+  });
+
+  it("honors an existing matching external_id and does not create a duplicate issue", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    const provider = createGitHubSyncProvider({ issueClient });
+    const binding = createBinding();
+    const project = createProject();
+    const existingExternalId = formatIssueExternalId({
+      owner: "evcraddock",
+      repo: "todu-github-plugin",
+      issueNumber: 99,
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    await provider.push(
+      binding,
+      [
+        createTask({
+          id: "task-99",
+          title: "Already linked",
+          status: "active",
+          externalId: existingExternalId,
+        }),
+      ],
+      project
+    );
+
+    expect(issueClient.snapshotIssues({ owner: "evcraddock", repo: "todu-github-plugin" })).toEqual(
+      []
+    );
+    expect(provider.getState().lastPushResult).toEqual({
+      createdIssues: [],
+      createdLinks: [
+        {
+          bindingId: binding.id,
+          taskId: createTaskId("task-99"),
+          issueNumber: 99,
+          externalId: existingExternalId,
+        },
+      ],
+      taskUpdates: [],
+    });
+  });
+
+  it("follows the duplicate policy by creating a new issue instead of fuzzy matching by title", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues({ owner: "evcraddock", repo: "todu-github-plugin" }, [
+      {
+        number: 1,
+        title: "Duplicate title",
+        body: "Existing issue",
+        state: "open",
+        labels: [],
+      },
+    ]);
+    const provider = createGitHubSyncProvider({ issueClient });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    await provider.push(
+      createBinding(),
+      [createTask({ id: "task-dup", title: "Duplicate title", status: "active" })],
+      createProject()
+    );
+
+    expect(
+      issueClient.snapshotIssues({ owner: "evcraddock", repo: "todu-github-plugin" })
+    ).toMatchObject([
+      { number: 1, title: "Duplicate title" },
+      { number: 2, title: "Duplicate title" },
+    ]);
+    expect(provider.getState().lastPushResult?.taskUpdates).toEqual([
+      {
+        taskId: createTaskId("task-dup"),
+        externalId: "evcraddock/todu-github-plugin#2",
+        sourceUrl: "https://github.com/evcraddock/todu-github-plugin/issues/2",
+      },
+    ]);
+  });
+
+  it("respects binding strategy for bootstrap pull and push", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues({ owner: "evcraddock", repo: "todu-github-plugin" }, [
+      {
+        number: 1,
+        title: "Strategy issue",
+        body: "Body",
+        state: "open",
+        labels: [],
+      },
+    ]);
+    const provider = createGitHubSyncProvider({ issueClient });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await expect(
+      provider.pull(createBinding({ strategy: "push" }), createProject())
+    ).resolves.toEqual({
+      tasks: [],
+    });
+    await expect(
+      provider.push(
+        createBinding({ strategy: "pull" }),
+        [createTask({ id: "task-strategy", title: "Should not export", status: "active" })],
+        createProject()
+      )
+    ).resolves.toBeUndefined();
+
+    expect(
+      issueClient.snapshotIssues({ owner: "evcraddock", repo: "todu-github-plugin" })
+    ).toHaveLength(1);
+    expect(provider.getState().lastPushResult).toEqual({
+      createdIssues: [],
+      createdLinks: [],
+      taskUpdates: [],
+    });
   });
 });
 
@@ -132,5 +392,26 @@ function createProject(): Project {
     priority: "high",
     createdAt: "2026-03-09T00:00:00.000Z",
     updatedAt: "2026-03-09T00:00:00.000Z",
+  };
+}
+
+function createTask(
+  overrides: {
+    id: string;
+    title: string;
+    status: Task["status"];
+  } & Partial<Omit<Task, "id" | "title" | "status">>
+): Task {
+  return {
+    id: createTaskId(overrides.id),
+    title: overrides.title,
+    status: overrides.status,
+    priority: overrides.priority ?? "medium",
+    projectId: overrides.projectId ?? createProjectId("project-1"),
+    labels: overrides.labels ?? [],
+    externalId: overrides.externalId,
+    sourceUrl: overrides.sourceUrl,
+    createdAt: overrides.createdAt ?? "2026-03-10T00:00:00.000Z",
+    updatedAt: overrides.updatedAt ?? "2026-03-10T00:00:00.000Z",
   };
 }
