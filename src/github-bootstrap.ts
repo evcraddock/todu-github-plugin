@@ -113,6 +113,12 @@ export async function bootstrapTasksToGitHubIssues(input: {
         input.repo,
         matchingExternalId.issueNumber
       );
+      task.externalId = createdLink.externalId;
+      task.sourceUrl ??= createIssueSourceUrl(
+        input.owner,
+        input.repo,
+        matchingExternalId.issueNumber
+      );
       input.linkStore.save(createdLink);
       createdLinks.push(createdLink);
       continue;
@@ -135,6 +141,8 @@ export async function bootstrapTasksToGitHubIssues(input: {
       input.repo,
       createdIssue.number
     );
+    task.externalId = createdLink.externalId;
+    task.sourceUrl = createdIssue.sourceUrl;
     input.linkStore.save(createdLink);
     createdLinks.push(createdLink);
     taskUpdates.push({
@@ -149,6 +157,10 @@ export async function bootstrapTasksToGitHubIssues(input: {
     createdLinks,
     taskUpdates,
   };
+}
+
+function createIssueSourceUrl(owner: string, repo: string, issueNumber: number): string {
+  return `https://github.com/${owner}/${repo}/issues/${issueNumber}`;
 }
 
 function getMatchingExternalId(

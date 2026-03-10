@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import type { IntegrationBinding, Task } from "@todu/core";
 
 import type { GitHubIssue } from "@/github-client";
@@ -56,6 +59,66 @@ export function createInMemoryGitHubItemLinkStore(): GitHubItemLinkStore {
     save(link): void {
       links.set(getTaskKey(link.bindingId, link.taskId), link);
       links.set(getIssueKey(link.bindingId, link.issueNumber), link);
+    },
+  };
+}
+
+export function createFileGitHubItemLinkStore(storagePath: string): GitHubItemLinkStore {
+  const readLinks = (): GitHubItemLink[] => {
+    if (!fs.existsSync(storagePath)) {
+      return [];
+    }
+
+    const rawContent = fs.readFileSync(storagePath, "utf8");
+    if (!rawContent.trim()) {
+      return [];
+    }
+
+    const parsedContent = JSON.parse(rawContent) as unknown;
+    if (!Array.isArray(parsedContent)) {
+      throw new Error(`Invalid GitHub item link store at ${storagePath}: expected JSON array`);
+    }
+
+    return parsedContent.map((link) => {
+      if (!link || typeof link !== "object") {
+        throw new Error(`Invalid GitHub item link store at ${storagePath}: invalid link record`);
+      }
+
+      return link as GitHubItemLink;
+    });
+  };
+
+  const writeLinks = (links: GitHubItemLink[]): void => {
+    fs.mkdirSync(path.dirname(storagePath), { recursive: true });
+    fs.writeFileSync(storagePath, `${JSON.stringify(links, null, 2)}\n`, "utf8");
+  };
+
+  const getLink = (predicate: (link: GitHubItemLink) => boolean): GitHubItemLink | null =>
+    readLinks().find(predicate) ?? null;
+
+  return {
+    getByTaskId(bindingId, taskId): GitHubItemLink | null {
+      return getLink((link) => link.bindingId === bindingId && link.taskId === taskId);
+    },
+    getByIssueNumber(bindingId, issueNumber): GitHubItemLink | null {
+      return getLink((link) => link.bindingId === bindingId && link.issueNumber === issueNumber);
+    },
+    list(bindingId): GitHubItemLink[] {
+      return readLinks().filter((link) => link.bindingId === bindingId);
+    },
+    listAll(): GitHubItemLink[] {
+      return readLinks();
+    },
+    save(link): void {
+      const existingLinks = readLinks().filter(
+        (existingLink) =>
+          !(
+            existingLink.bindingId === link.bindingId &&
+            (existingLink.taskId === link.taskId || existingLink.issueNumber === link.issueNumber)
+          )
+      );
+      existingLinks.push(link);
+      writeLinks(existingLinks);
     },
   };
 }

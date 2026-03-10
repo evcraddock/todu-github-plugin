@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import {
   createIntegrationBindingId,
   createProjectId,
@@ -16,6 +20,7 @@ import {
   GitHubProviderConfigError,
   createGitHubSyncProvider,
   createInMemoryGitHubIssueClient,
+  createInMemoryGitHubItemLinkStore,
   formatIssueExternalId,
   loadGitHubProviderSettings,
   parseGitHubBinding,
@@ -100,6 +105,7 @@ describe("loadGitHubProviderSettings", () => {
   it("loads a trimmed token from provider settings", () => {
     expect(loadGitHubProviderSettings({ settings: { token: "  secret-token  " } })).toEqual({
       token: "secret-token",
+      storagePath: ".todu-github-plugin/item-links.json",
     });
   });
 
@@ -149,7 +155,10 @@ describe("createGitHubSyncProvider", () => {
       },
     ]);
 
-    const provider = createGitHubSyncProvider({ issueClient });
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
     const project = createProject();
     const binding = createBinding();
 
@@ -211,20 +220,27 @@ describe("createGitHubSyncProvider", () => {
 
   it("bootstraps active/inprogress/waiting tasks into GitHub and ignores done/canceled", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
-    const provider = createGitHubSyncProvider({ issueClient });
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
     const binding = createBinding();
     const project = createProject();
 
     await provider.initialize({ settings: { token: "secret-token" } });
+    const activeTask = createTask({ id: "task-1", title: "Active task", status: "active" });
+    const inProgressTask = createTask({
+      id: "task-2",
+      title: "In progress task",
+      status: "inprogress",
+    });
+    const waitingTask = createTask({ id: "task-3", title: "Waiting task", status: "waiting" });
+    const doneTask = createTask({ id: "task-4", title: "Done task", status: "done" });
+    const canceledTask = createTask({ id: "task-5", title: "Canceled task", status: "canceled" });
+
     await provider.push(
       binding,
-      [
-        createTask({ id: "task-1", title: "Active task", status: "active" }),
-        createTask({ id: "task-2", title: "In progress task", status: "inprogress" }),
-        createTask({ id: "task-3", title: "Waiting task", status: "waiting" }),
-        createTask({ id: "task-4", title: "Done task", status: "done" }),
-        createTask({ id: "task-5", title: "Canceled task", status: "canceled" }),
-      ],
+      [activeTask, inProgressTask, waitingTask, doneTask, canceledTask],
       project
     );
 
@@ -252,11 +268,19 @@ describe("createGitHubSyncProvider", () => {
         },
       ],
     });
+    expect(activeTask.externalId).toBe("evcraddock/todu-github-plugin#1");
+    expect(inProgressTask.externalId).toBe("evcraddock/todu-github-plugin#2");
+    expect(waitingTask.externalId).toBe("evcraddock/todu-github-plugin#3");
+    expect(doneTask.externalId).toBeUndefined();
+    expect(canceledTask.externalId).toBeUndefined();
   });
 
   it("honors an existing matching external_id and does not create a duplicate issue", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
-    const provider = createGitHubSyncProvider({ issueClient });
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
     const binding = createBinding();
     const project = createProject();
     const existingExternalId = formatIssueExternalId({
@@ -266,18 +290,14 @@ describe("createGitHubSyncProvider", () => {
     });
 
     await provider.initialize({ settings: { token: "secret-token" } });
-    await provider.push(
-      binding,
-      [
-        createTask({
-          id: "task-99",
-          title: "Already linked",
-          status: "active",
-          externalId: existingExternalId,
-        }),
-      ],
-      project
-    );
+    const linkedTask = createTask({
+      id: "task-99",
+      title: "Already linked",
+      status: "active",
+      externalId: existingExternalId,
+    });
+
+    await provider.push(binding, [linkedTask], project);
 
     expect(issueClient.snapshotIssues({ owner: "evcraddock", repo: "todu-github-plugin" })).toEqual(
       []
@@ -294,6 +314,8 @@ describe("createGitHubSyncProvider", () => {
       ],
       taskUpdates: [],
     });
+    expect(linkedTask.externalId).toBe(existingExternalId);
+    expect(linkedTask.sourceUrl).toBe("https://github.com/evcraddock/todu-github-plugin/issues/99");
   });
 
   it("follows the duplicate policy by creating a new issue instead of fuzzy matching by title", async () => {
@@ -307,14 +329,18 @@ describe("createGitHubSyncProvider", () => {
         labels: [],
       },
     ]);
-    const provider = createGitHubSyncProvider({ issueClient });
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+    const duplicateTask = createTask({
+      id: "task-dup",
+      title: "Duplicate title",
+      status: "active",
+    });
 
     await provider.initialize({ settings: { token: "secret-token" } });
-    await provider.push(
-      createBinding(),
-      [createTask({ id: "task-dup", title: "Duplicate title", status: "active" })],
-      createProject()
-    );
+    await provider.push(createBinding(), [duplicateTask], createProject());
 
     expect(
       issueClient.snapshotIssues({ owner: "evcraddock", repo: "todu-github-plugin" })
@@ -327,6 +353,43 @@ describe("createGitHubSyncProvider", () => {
         taskId: createTaskId("task-dup"),
         externalId: "evcraddock/todu-github-plugin#2",
         sourceUrl: "https://github.com/evcraddock/todu-github-plugin/issues/2",
+      },
+    ]);
+    expect(duplicateTask.externalId).toBe("evcraddock/todu-github-plugin#2");
+  });
+
+  it("persists item links in file-backed local runtime storage across provider instances", async () => {
+    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "todu-github-plugin-"));
+    const storagePath = path.join(tempDirectory, "item-links.json");
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues({ owner: "evcraddock", repo: "todu-github-plugin" }, [
+      {
+        number: 1,
+        title: "Persisted issue",
+        body: "Body",
+        state: "open",
+        labels: [],
+      },
+    ]);
+
+    const firstProvider = createGitHubSyncProvider({ issueClient });
+    await firstProvider.initialize({ settings: { token: "secret-token", storagePath } });
+    await firstProvider.pull(createBinding(), createProject());
+
+    expect(fs.existsSync(storagePath)).toBe(true);
+
+    const secondProvider = createGitHubSyncProvider({ issueClient });
+    await secondProvider.initialize({ settings: { token: "secret-token", storagePath } });
+
+    await expect(secondProvider.pull(createBinding(), createProject())).resolves.toEqual({
+      tasks: [],
+    });
+    expect(secondProvider.getState().itemLinks).toEqual([
+      {
+        bindingId: createIntegrationBindingId("binding-1"),
+        taskId: createTaskId("github:evcraddock/todu-github-plugin#1"),
+        issueNumber: 1,
+        externalId: "evcraddock/todu-github-plugin#1",
       },
     ]);
   });
@@ -342,7 +405,10 @@ describe("createGitHubSyncProvider", () => {
         labels: [],
       },
     ]);
-    const provider = createGitHubSyncProvider({ issueClient });
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
 
     await provider.initialize({ settings: { token: "secret-token" } });
 

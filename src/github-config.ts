@@ -4,6 +4,7 @@ export type GitHubProviderConfigErrorCode = "INVALID_SETTINGS" | "MISSING_TOKEN"
 
 export interface GitHubProviderSettings {
   token: string;
+  storagePath: string;
 }
 
 export class GitHubProviderConfigError extends Error {
@@ -42,7 +43,20 @@ export function loadGitHubProviderSettings(config: SyncProviderConfig): GitHubPr
     );
   }
 
+  const storagePath = settings.storagePath;
+  if (storagePath !== undefined && (typeof storagePath !== "string" || !storagePath.trim())) {
+    throw new GitHubProviderConfigError(
+      "INVALID_SETTINGS",
+      "Invalid GitHub provider settings: settings.storagePath must be a non-empty string when provided",
+      {
+        field: "settings.storagePath",
+      }
+    );
+  }
+
   return {
     token: token.trim(),
+    storagePath:
+      typeof storagePath === "string" ? storagePath.trim() : ".todu-github-plugin/item-links.json",
   };
 }

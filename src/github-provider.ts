@@ -24,6 +24,7 @@ import {
 import { loadGitHubProviderSettings, type GitHubProviderSettings } from "@/github-config";
 import { createImportedTaskId } from "@/github-ids";
 import {
+  createFileGitHubItemLinkStore,
   createInMemoryGitHubItemLinkStore,
   type GitHubItemLink,
   type GitHubItemLinkStore,
@@ -59,7 +60,7 @@ export function createGitHubSyncProvider(
   let lastPullResult: GitHubBootstrapImportResult | null = null;
   let lastPushResult: GitHubBootstrapExportResult | null = null;
   const issueClient = options.issueClient ?? createInMemoryGitHubIssueClient();
-  const linkStore = options.linkStore ?? createInMemoryGitHubItemLinkStore();
+  let linkStore = options.linkStore ?? createInMemoryGitHubItemLinkStore();
 
   const requireInitializedSettings = (): GitHubProviderSettings => {
     if (!settings) {
@@ -83,6 +84,9 @@ export function createGitHubSyncProvider(
     version: GITHUB_PROVIDER_VERSION,
     async initialize(config: SyncProviderConfig): Promise<void> {
       settings = loadGitHubProviderSettings(config);
+      if (!options.linkStore) {
+        linkStore = createFileGitHubItemLinkStore(settings.storagePath);
+      }
     },
     async shutdown(): Promise<void> {
       settings = null;

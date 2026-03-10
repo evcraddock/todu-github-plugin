@@ -36,6 +36,7 @@ export {
   type InMemoryGitHubIssueClient,
 } from "@/github-client";
 export {
+  createFileGitHubItemLinkStore,
   createInMemoryGitHubItemLinkStore,
   createLinkFromIssue,
   createLinkFromTask,
