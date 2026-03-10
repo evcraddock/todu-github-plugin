@@ -1,13 +1,10 @@
-export interface GitHubIssueRef {
-  owner: string;
-  repo: string;
-  issueNumber: number;
-}
-
-export function formatIssueExternalId(issue: GitHubIssueRef): string {
-  return `${issue.owner}/${issue.repo}#${issue.issueNumber}`;
-}
-
+export {
+  GitHubExternalIdError,
+  createImportedTaskId,
+  formatIssueExternalId,
+  parseIssueExternalId,
+  type GitHubIssueRef,
+} from "@/github-ids";
 export {
   GITHUB_PROVIDER_NAME,
   GITHUB_REPOSITORY_TARGET_KIND,
@@ -27,6 +24,29 @@ export {
   createGitHubSyncProvider,
   githubProvider,
   syncProvider,
+  type CreateGitHubSyncProviderOptions,
   type GitHubProviderState,
   type GitHubSyncProvider,
 } from "@/github-provider";
+export {
+  createInMemoryGitHubIssueClient,
+  type CreateGitHubIssueInput,
+  type GitHubIssue,
+  type GitHubIssueClient,
+  type InMemoryGitHubIssueClient,
+} from "@/github-client";
+export {
+  createFileGitHubItemLinkStore,
+  createInMemoryGitHubItemLinkStore,
+  createLinkFromIssue,
+  createLinkFromTask,
+  type GitHubItemLink,
+  type GitHubItemLinkStore,
+} from "@/github-links";
+export {
+  bootstrapGitHubIssuesToTasks,
+  bootstrapTasksToGitHubIssues,
+  type GitHubBootstrapExportResult,
+  type GitHubBootstrapImportResult,
+  type GitHubBootstrapTaskUpdate,
+} from "@/github-bootstrap";

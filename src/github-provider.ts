@@ -1,6 +1,5 @@
 import {
   SYNC_PROVIDER_API_VERSION,
-  createTaskId,
   type ExternalTask,
   type Project,
   type SyncProvider,
@@ -11,11 +10,25 @@ import {
 } from "@todu/core";
 
 import {
+  bootstrapGitHubIssuesToTasks,
+  bootstrapTasksToGitHubIssues,
+  type GitHubBootstrapExportResult,
+  type GitHubBootstrapImportResult,
+} from "@/github-bootstrap";
+import { createInMemoryGitHubIssueClient, type GitHubIssueClient } from "@/github-client";
+import {
   GITHUB_PROVIDER_NAME,
   parseGitHubBinding,
   type GitHubRepositoryBinding,
 } from "@/github-binding";
 import { loadGitHubProviderSettings, type GitHubProviderSettings } from "@/github-config";
+import { createImportedTaskId } from "@/github-ids";
+import {
+  createFileGitHubItemLinkStore,
+  createInMemoryGitHubItemLinkStore,
+  type GitHubItemLink,
+  type GitHubItemLinkStore,
+} from "@/github-links";
 
 export const GITHUB_PROVIDER_VERSION = "0.1.0";
 
@@ -26,14 +39,28 @@ const TASK_PRIORITIES = new Set(["low", "medium", "high"]);
 export interface GitHubProviderState {
   initialized: boolean;
   settings: GitHubProviderSettings | null;
+  itemLinks: GitHubItemLink[];
+  lastPullResult: GitHubBootstrapImportResult | null;
+  lastPushResult: GitHubBootstrapExportResult | null;
 }
 
 export interface GitHubSyncProvider extends SyncProvider {
   getState(): GitHubProviderState;
 }
 
-export function createGitHubSyncProvider(): GitHubSyncProvider {
+export interface CreateGitHubSyncProviderOptions {
+  issueClient?: GitHubIssueClient;
+  linkStore?: GitHubItemLinkStore;
+}
+
+export function createGitHubSyncProvider(
+  options: CreateGitHubSyncProviderOptions = {}
+): GitHubSyncProvider {
   let settings: GitHubProviderSettings | null = null;
+  let lastPullResult: GitHubBootstrapImportResult | null = null;
+  let lastPushResult: GitHubBootstrapExportResult | null = null;
+  const issueClient = options.issueClient ?? createInMemoryGitHubIssueClient();
+  let linkStore = options.linkStore ?? createInMemoryGitHubItemLinkStore();
 
   const requireInitializedSettings = (): GitHubProviderSettings => {
     if (!settings) {
@@ -57,23 +84,64 @@ export function createGitHubSyncProvider(): GitHubSyncProvider {
     version: GITHUB_PROVIDER_VERSION,
     async initialize(config: SyncProviderConfig): Promise<void> {
       settings = loadGitHubProviderSettings(config);
+      if (!options.linkStore) {
+        linkStore = createFileGitHubItemLinkStore(settings.storagePath);
+      }
     },
     async shutdown(): Promise<void> {
       settings = null;
+      lastPullResult = null;
+      lastPushResult = null;
     },
-    async pull(binding, _project): Promise<SyncProviderPullResult> {
-      validateBinding(binding);
+    async pull(binding, project): Promise<SyncProviderPullResult> {
+      const parsedBinding = validateBinding(binding);
+      if (binding.strategy === "none" || binding.strategy === "push") {
+        lastPullResult = {
+          tasks: [],
+          createdLinks: [],
+        };
+
+        return {
+          tasks: [],
+        };
+      }
+
+      lastPullResult = await bootstrapGitHubIssuesToTasks({
+        binding,
+        owner: parsedBinding.owner,
+        repo: parsedBinding.repo,
+        project,
+        issueClient,
+        linkStore,
+      });
 
       return {
-        tasks: [],
+        tasks: lastPullResult.tasks,
       };
     },
-    async push(binding, _tasks, _project): Promise<void> {
-      validateBinding(binding);
+    async push(binding, tasks, _project): Promise<void> {
+      const parsedBinding = validateBinding(binding);
+      if (binding.strategy === "none" || binding.strategy === "pull") {
+        lastPushResult = {
+          createdIssues: [],
+          createdLinks: [],
+          taskUpdates: [],
+        };
+        return;
+      }
+
+      lastPushResult = await bootstrapTasksToGitHubIssues({
+        binding,
+        owner: parsedBinding.owner,
+        repo: parsedBinding.repo,
+        tasks,
+        issueClient,
+        linkStore,
+      });
     },
     mapToTask(external: ExternalTask, project: Project): Task {
       return {
-        id: createTaskId(`github:${external.externalId}`),
+        id: createImportedTaskId(external.externalId),
         title: external.title,
         status: normalizeTaskStatus(external.status),
         priority: normalizeTaskPriority(external.priority),
@@ -101,6 +169,9 @@ export function createGitHubSyncProvider(): GitHubSyncProvider {
       return {
         initialized: settings !== null,
         settings,
+        itemLinks: linkStore.listAll(),
+        lastPullResult,
+        lastPushResult,
       };
     },
   };
