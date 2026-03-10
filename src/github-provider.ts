@@ -5,9 +5,10 @@ import {
   type SyncProvider,
   type SyncProviderConfig,
   type SyncProviderPullResult,
+  type SyncProviderPushResult,
   type SyncProviderRegistration,
   type Task,
-  type TaskWithDetail,
+  type TaskPushPayload,
 } from "@todu/core";
 
 import {
@@ -22,6 +23,12 @@ import {
   parseGitHubBinding,
   type GitHubRepositoryBinding,
 } from "@/github-binding";
+import {
+  createInMemoryGitHubCommentLinkStore,
+  type GitHubCommentLink,
+  type GitHubCommentLinkStore,
+} from "@/github-comment-links";
+import { pullComments, pushComments } from "@/github-comments";
 import { loadGitHubProviderSettings, type GitHubProviderSettings } from "@/github-config";
 import { createImportedTaskId } from "@/github-ids";
 import {
@@ -41,6 +48,7 @@ export interface GitHubProviderState {
   initialized: boolean;
   settings: GitHubProviderSettings | null;
   itemLinks: GitHubItemLink[];
+  commentLinks: GitHubCommentLink[];
   lastPullResult: GitHubBootstrapImportResult | null;
   lastPushResult: GitHubBootstrapExportResult | null;
 }
@@ -52,6 +60,7 @@ export interface GitHubSyncProvider extends SyncProvider {
 export interface CreateGitHubSyncProviderOptions {
   issueClient?: GitHubIssueClient;
   linkStore?: GitHubItemLinkStore;
+  commentLinkStore?: GitHubCommentLinkStore;
 }
 
 export function createGitHubSyncProvider(
@@ -62,6 +71,7 @@ export function createGitHubSyncProvider(
   let lastPushResult: GitHubBootstrapExportResult | null = null;
   const issueClient = options.issueClient ?? createInMemoryGitHubIssueClient();
   let linkStore = options.linkStore ?? createInMemoryGitHubItemLinkStore();
+  const commentLinkStore = options.commentLinkStore ?? createInMemoryGitHubCommentLinkStore();
 
   const requireInitializedSettings = (): GitHubProviderSettings => {
     if (!settings) {
@@ -115,11 +125,21 @@ export function createGitHubSyncProvider(
         linkStore,
       });
 
+      const pullCommentsResult = await pullComments({
+        binding,
+        owner: parsedBinding.owner,
+        repo: parsedBinding.repo,
+        issueClient,
+        itemLinkStore: linkStore,
+        commentLinkStore,
+      });
+
       return {
         tasks: lastPullResult.tasks,
+        comments: pullCommentsResult.comments,
       };
     },
-    async push(binding, tasks: TaskWithDetail[], _project): Promise<void> {
+    async push(binding, tasks: TaskPushPayload[], _project): Promise<SyncProviderPushResult> {
       const parsedBinding = validateBinding(binding);
       if (binding.strategy === "none" || binding.strategy === "pull") {
         lastPushResult = {
@@ -128,7 +148,7 @@ export function createGitHubSyncProvider(
           createdLinks: [],
           taskUpdates: [],
         };
-        return;
+        return { commentLinks: [] };
       }
 
       lastPushResult = await bootstrapTasksToGitHubIssues({
@@ -139,6 +159,18 @@ export function createGitHubSyncProvider(
         issueClient,
         linkStore,
       });
+
+      const pushCommentsResult = await pushComments({
+        binding,
+        owner: parsedBinding.owner,
+        repo: parsedBinding.repo,
+        tasks,
+        issueClient,
+        itemLinkStore: linkStore,
+        commentLinkStore,
+      });
+
+      return { commentLinks: pushCommentsResult.commentLinks };
     },
     mapToTask(external: ExternalTask, project: Project): Task {
       return {
@@ -155,7 +187,7 @@ export function createGitHubSyncProvider(
         updatedAt: external.updatedAt ?? external.createdAt ?? DEFAULT_TIMESTAMP,
       };
     },
-    mapFromTask(task: TaskWithDetail): ExternalTask {
+    mapFromTask(task: TaskPushPayload): ExternalTask {
       return {
         externalId: task.externalId ?? String(task.id),
         title: task.title,
@@ -173,6 +205,7 @@ export function createGitHubSyncProvider(
         initialized: settings !== null,
         settings,
         itemLinks: linkStore.listAll(),
+        commentLinks: commentLinkStore.listAll(),
         lastPullResult,
         lastPushResult,
       };
