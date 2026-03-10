@@ -1,4 +1,4 @@
-import type { ExternalTask, IntegrationBinding, TaskWithDetail } from "@todu/core";
+import type { ExternalTask, IntegrationBinding, TaskPushPayload } from "@todu/core";
 
 import type { GitHubIssue, GitHubIssueClient } from "@/github-client";
 import {
@@ -14,7 +14,7 @@ import {
 } from "@/github-links";
 import { parseIssueExternalId } from "@/github-ids";
 
-const TASK_BOOTSTRAP_EXPORT_STATUSES = new Set<TaskWithDetail["status"]>([
+const TASK_BOOTSTRAP_EXPORT_STATUSES = new Set<TaskPushPayload["status"]>([
   "active",
   "inprogress",
   "waiting",
@@ -26,7 +26,7 @@ export interface GitHubBootstrapImportResult {
 }
 
 export interface GitHubBootstrapTaskUpdate {
-  taskId: TaskWithDetail["id"];
+  taskId: TaskPushPayload["id"];
   externalId: string;
   sourceUrl?: string;
 }
@@ -82,7 +82,7 @@ export async function bootstrapTasksToGitHubIssues(input: {
   binding: IntegrationBinding;
   owner: string;
   repo: string;
-  tasks: TaskWithDetail[];
+  tasks: TaskPushPayload[];
   issueClient: GitHubIssueClient;
   linkStore: GitHubItemLinkStore;
 }): Promise<GitHubBootstrapExportResult> {
@@ -203,7 +203,7 @@ function createIssueSourceUrl(owner: string, repo: string, issueNumber: number):
   return `https://github.com/${owner}/${repo}/issues/${issueNumber}`;
 }
 
-function shouldPushTaskUpdate(task: TaskWithDetail, issue: GitHubIssue | null): boolean {
+function shouldPushTaskUpdate(task: TaskPushPayload, issue: GitHubIssue | null): boolean {
   if (!issue?.updatedAt) {
     return true;
   }
@@ -219,7 +219,7 @@ function shouldPushTaskUpdate(task: TaskWithDetail, issue: GitHubIssue | null): 
 }
 
 function getMatchingExternalId(
-  task: TaskWithDetail,
+  task: TaskPushPayload,
   owner: string,
   repo: string
 ): { issueNumber: number } | null {

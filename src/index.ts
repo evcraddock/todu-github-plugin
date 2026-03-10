@@ -31,6 +31,7 @@ export {
 export {
   createInMemoryGitHubIssueClient,
   type CreateGitHubIssueInput,
+  type GitHubComment,
   type GitHubIssue,
   type GitHubIssueClient,
   type InMemoryGitHubIssueClient,
@@ -64,3 +65,19 @@ export {
   type GitHubBootstrapImportResult,
   type GitHubBootstrapTaskUpdate,
 } from "@/github-bootstrap";
+export {
+  createFileGitHubCommentLinkStore,
+  createInMemoryGitHubCommentLinkStore,
+  type GitHubCommentLink,
+  type GitHubCommentLinkStore,
+} from "@/github-comment-links";
+export {
+  formatAttributedBody,
+  formatGitHubAttribution,
+  formatToduAttribution,
+  pullComments,
+  pushComments,
+  stripAttribution,
+  type PullCommentsResult,
+  type PushCommentsResult,
+} from "@/github-comments";
