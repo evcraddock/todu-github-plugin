@@ -31,6 +31,7 @@ import {
   type GitHubBootstrapImportResult,
 } from "@/github-bootstrap";
 import { createInMemoryGitHubIssueClient, type GitHubIssueClient } from "@/github-client";
+import { createHttpGitHubIssueClient } from "@/github-http-client";
 import {
   createInMemoryGitHubCommentLinkStore,
   type GitHubCommentLink,
@@ -102,7 +103,7 @@ export function createGitHubSyncProvider(
   let settings: GitHubProviderSettings | null = null;
   let lastPullResult: GitHubBootstrapImportResult | null = null;
   let lastPushResult: GitHubBootstrapExportResult | null = null;
-  const issueClient = options.issueClient ?? createInMemoryGitHubIssueClient();
+  let issueClient: GitHubIssueClient = options.issueClient ?? createInMemoryGitHubIssueClient();
   let linkStore = options.linkStore ?? createInMemoryGitHubItemLinkStore();
   const commentLinkStore = options.commentLinkStore ?? createInMemoryGitHubCommentLinkStore();
   const runtimeStore = options.runtimeStore ?? createInMemoryBindingRuntimeStore();
@@ -164,6 +165,10 @@ export function createGitHubSyncProvider(
     version: GITHUB_PROVIDER_VERSION,
     async initialize(config: SyncProviderConfig): Promise<void> {
       settings = loadGitHubProviderSettings(config);
+      if (!options.issueClient) {
+        issueClient = createHttpGitHubIssueClient(settings.token);
+      }
+
       if (!options.linkStore) {
         linkStore = createFileGitHubItemLinkStore(settings.storagePath);
       }

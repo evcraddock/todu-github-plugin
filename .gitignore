@@ -29,3 +29,6 @@ coverage/
 
 # Local development runtime state
 .dev/
+
+# Plugin runtime data
+.todu-github-plugin/

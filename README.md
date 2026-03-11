@@ -49,10 +49,12 @@ You should see the `github` plugin listed with status `ok`. The plugin path is c
 ### 4. Configure the GitHub token
 
 ```bash
-make dev-cli CMD="plugin config github --set '{\"token\": \"ghp_your_token_here\"}'"
+make dev-cli CMD="plugin config github --set '{\"settings\":{\"token\":\"ghp_your_token_here\"},\"intervalSeconds\":30}'"
 ```
 
-This stores the token in the dev daemon's plugin config. The daemon must be restarted for the provider to pick up new config:
+The token must be nested under `settings` because the daemon passes the `settings` sub-object to the provider's `initialize()` method. The optional `intervalSeconds` controls the sync polling interval (default: 300 seconds).
+
+Restart the daemon to pick up new config:
 
 ```bash
 make dev-stop && make dev
