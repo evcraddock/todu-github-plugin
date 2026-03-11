@@ -1,6 +1,7 @@
 import {
   SYNC_PROVIDER_API_VERSION,
   type ExternalTask,
+  type IntegrationBinding,
   type Project,
   type SyncProvider,
   type SyncProviderConfig,
@@ -12,17 +13,24 @@ import {
 } from "@todu/core";
 
 import {
+  createBindingStatus,
+  updateBindingStatusError,
+  updateBindingStatusIdle,
+  updateBindingStatusRunning,
+  type BindingStatus,
+} from "@/github-binding-status";
+import {
+  GITHUB_PROVIDER_NAME,
+  parseGitHubBinding,
+  type GitHubRepositoryBinding,
+} from "@/github-binding";
+import {
   bootstrapGitHubIssuesToTasks,
   bootstrapTasksToGitHubIssues,
   type GitHubBootstrapExportResult,
   type GitHubBootstrapImportResult,
 } from "@/github-bootstrap";
 import { createInMemoryGitHubIssueClient, type GitHubIssueClient } from "@/github-client";
-import {
-  GITHUB_PROVIDER_NAME,
-  parseGitHubBinding,
-  type GitHubRepositoryBinding,
-} from "@/github-binding";
 import {
   createInMemoryGitHubCommentLinkStore,
   type GitHubCommentLink,
@@ -37,12 +45,32 @@ import {
   type GitHubItemLink,
   type GitHubItemLinkStore,
 } from "@/github-links";
+import {
+  createGitHubSyncLogger,
+  type GitHubSyncLogger,
+  type SyncLogContext,
+} from "@/github-logger";
+import {
+  createLoopPreventionStore,
+  createWriteKey,
+  type LoopPreventionStore,
+} from "@/github-loop-prevention";
+import {
+  createInMemoryBindingRuntimeStore,
+  createInitialRuntimeState,
+  recordFailure,
+  recordSuccess,
+  shouldRetry,
+  type BindingRuntimeStore,
+  type RetryConfig,
+} from "@/github-runtime";
 
 export const GITHUB_PROVIDER_VERSION = "0.1.0";
 
 const DEFAULT_TIMESTAMP = new Date(0).toISOString();
 const OPEN_TASK_STATUSES = new Set(["active", "inprogress", "waiting"]);
 const TASK_PRIORITIES = new Set(["low", "medium", "high"]);
+const DEFAULT_LOOP_PREVENTION_MAX_AGE_MS = 10 * 60 * 1000;
 
 export interface GitHubProviderState {
   initialized: boolean;
@@ -51,6 +79,7 @@ export interface GitHubProviderState {
   commentLinks: GitHubCommentLink[];
   lastPullResult: GitHubBootstrapImportResult | null;
   lastPushResult: GitHubBootstrapExportResult | null;
+  bindingStatuses: Map<IntegrationBinding["id"], BindingStatus>;
 }
 
 export interface GitHubSyncProvider extends SyncProvider {
@@ -61,6 +90,10 @@ export interface CreateGitHubSyncProviderOptions {
   issueClient?: GitHubIssueClient;
   linkStore?: GitHubItemLinkStore;
   commentLinkStore?: GitHubCommentLinkStore;
+  runtimeStore?: BindingRuntimeStore;
+  loopPreventionStore?: LoopPreventionStore;
+  logger?: GitHubSyncLogger;
+  retryConfig?: RetryConfig;
 }
 
 export function createGitHubSyncProvider(
@@ -72,6 +105,42 @@ export function createGitHubSyncProvider(
   const issueClient = options.issueClient ?? createInMemoryGitHubIssueClient();
   let linkStore = options.linkStore ?? createInMemoryGitHubItemLinkStore();
   const commentLinkStore = options.commentLinkStore ?? createInMemoryGitHubCommentLinkStore();
+  const runtimeStore = options.runtimeStore ?? createInMemoryBindingRuntimeStore();
+  const loopPreventionStore = options.loopPreventionStore ?? createLoopPreventionStore();
+  const logger = options.logger ?? createGitHubSyncLogger();
+  const retryConfig = options.retryConfig;
+  const bindingStatuses = new Map<IntegrationBinding["id"], BindingStatus>();
+
+  const getOrCreateBindingStatus = (bindingId: IntegrationBinding["id"]): BindingStatus => {
+    let status = bindingStatuses.get(bindingId);
+    if (!status) {
+      status = createBindingStatus(bindingId);
+      bindingStatuses.set(bindingId, status);
+    }
+
+    return status;
+  };
+
+  const getOrCreateRuntimeState = (bindingId: IntegrationBinding["id"]) => {
+    let state = runtimeStore.get(bindingId);
+    if (!state) {
+      state = createInitialRuntimeState(bindingId);
+      runtimeStore.save(state);
+    }
+
+    return state;
+  };
+
+  const createLogContext = (
+    binding: IntegrationBinding,
+    parsedBinding: GitHubRepositoryBinding,
+    direction: "pull" | "push"
+  ): SyncLogContext => ({
+    bindingId: binding.id,
+    projectId: String(binding.projectId),
+    repo: `${parsedBinding.owner}/${parsedBinding.repo}`,
+    direction,
+  });
 
   const requireInitializedSettings = (): GitHubProviderSettings => {
     if (!settings) {
@@ -106,41 +175,77 @@ export function createGitHubSyncProvider(
     },
     async pull(binding, _project): Promise<SyncProviderPullResult> {
       const parsedBinding = validateBinding(binding);
-      if (binding.strategy === "none" || binding.strategy === "push") {
-        lastPullResult = {
-          tasks: [],
-          createdLinks: [],
-        };
+      const logContext = createLogContext(binding, parsedBinding, "pull");
 
-        return {
-          tasks: [],
-        };
+      if (binding.strategy === "none" || binding.strategy === "push") {
+        lastPullResult = { tasks: [], createdLinks: [] };
+        logger.debug("skipping pull due to binding strategy", logContext);
+        return { tasks: [] };
       }
 
-      lastPullResult = await bootstrapGitHubIssuesToTasks({
-        binding,
-        owner: parsedBinding.owner,
-        repo: parsedBinding.repo,
-        issueClient,
-        linkStore,
-      });
+      const runtimeState = getOrCreateRuntimeState(binding.id);
+      if (!shouldRetry(runtimeState)) {
+        logger.info("skipping pull: retry backoff not elapsed", logContext);
+        return { tasks: [] };
+      }
 
-      const pullCommentsResult = await pullComments({
-        binding,
-        owner: parsedBinding.owner,
-        repo: parsedBinding.repo,
-        issueClient,
-        itemLinkStore: linkStore,
-        commentLinkStore,
-      });
+      const status = getOrCreateBindingStatus(binding.id);
+      bindingStatuses.set(binding.id, updateBindingStatusRunning(status));
+      logger.info("pull started", logContext);
 
-      return {
-        tasks: lastPullResult.tasks,
-        comments: pullCommentsResult.comments,
-      };
+      try {
+        loopPreventionStore.clearExpired(DEFAULT_LOOP_PREVENTION_MAX_AGE_MS);
+
+        lastPullResult = await bootstrapGitHubIssuesToTasks({
+          binding,
+          owner: parsedBinding.owner,
+          repo: parsedBinding.repo,
+          issueClient,
+          linkStore,
+        });
+
+        const pullCommentsResult = await pullComments({
+          binding,
+          owner: parsedBinding.owner,
+          repo: parsedBinding.repo,
+          issueClient,
+          itemLinkStore: linkStore,
+          commentLinkStore,
+        });
+
+        const updatedRuntimeState = recordSuccess(runtimeState, null);
+        runtimeStore.save(updatedRuntimeState);
+        bindingStatuses.set(
+          binding.id,
+          updateBindingStatusIdle(getOrCreateBindingStatus(binding.id))
+        );
+
+        logger.info("pull completed", {
+          ...logContext,
+          itemId: `${lastPullResult.tasks.length} tasks, ${pullCommentsResult.comments.length} comments`,
+        });
+
+        return {
+          tasks: lastPullResult.tasks,
+          comments: pullCommentsResult.comments,
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const failedState = recordFailure(runtimeState, errorMessage, retryConfig);
+        runtimeStore.save(failedState);
+        bindingStatuses.set(
+          binding.id,
+          updateBindingStatusError(getOrCreateBindingStatus(binding.id), errorMessage)
+        );
+
+        logger.error("pull failed", logContext, errorMessage);
+        throw error;
+      }
     },
     async push(binding, tasks: TaskPushPayload[], _project): Promise<SyncProviderPushResult> {
       const parsedBinding = validateBinding(binding);
+      const logContext = createLogContext(binding, parsedBinding, "push");
+
       if (binding.strategy === "none" || binding.strategy === "pull") {
         lastPushResult = {
           createdIssues: [],
@@ -148,29 +253,97 @@ export function createGitHubSyncProvider(
           createdLinks: [],
           taskUpdates: [],
         };
+        logger.debug("skipping push due to binding strategy", logContext);
         return { commentLinks: [] };
       }
 
-      lastPushResult = await bootstrapTasksToGitHubIssues({
-        binding,
-        owner: parsedBinding.owner,
-        repo: parsedBinding.repo,
-        tasks,
-        issueClient,
-        linkStore,
-      });
+      const runtimeState = getOrCreateRuntimeState(binding.id);
+      if (!shouldRetry(runtimeState)) {
+        logger.info("skipping push: retry backoff not elapsed", logContext);
+        return { commentLinks: [] };
+      }
 
-      const pushCommentsResult = await pushComments({
-        binding,
-        owner: parsedBinding.owner,
-        repo: parsedBinding.repo,
-        tasks,
-        issueClient,
-        itemLinkStore: linkStore,
-        commentLinkStore,
-      });
+      const status = getOrCreateBindingStatus(binding.id);
+      bindingStatuses.set(binding.id, updateBindingStatusRunning(status));
+      logger.info("push started", logContext);
 
-      return { commentLinks: pushCommentsResult.commentLinks };
+      try {
+        lastPushResult = await bootstrapTasksToGitHubIssues({
+          binding,
+          owner: parsedBinding.owner,
+          repo: parsedBinding.repo,
+          tasks,
+          issueClient,
+          linkStore,
+        });
+
+        for (const createdIssue of lastPushResult.createdIssues) {
+          const writeKey = createWriteKey("issue", String(binding.id), String(createdIssue.number));
+          loopPreventionStore.recordWrite(
+            writeKey,
+            createdIssue.updatedAt ?? new Date().toISOString()
+          );
+        }
+
+        for (const updatedIssue of lastPushResult.updatedIssues) {
+          const writeKey = createWriteKey("issue", String(binding.id), String(updatedIssue.number));
+          loopPreventionStore.recordWrite(
+            writeKey,
+            updatedIssue.updatedAt ?? new Date().toISOString()
+          );
+        }
+
+        const pushCommentsResult = await pushComments({
+          binding,
+          owner: parsedBinding.owner,
+          repo: parsedBinding.repo,
+          tasks,
+          issueClient,
+          itemLinkStore: linkStore,
+          commentLinkStore,
+        });
+
+        for (const createdComment of pushCommentsResult.createdComments) {
+          const writeKey = createWriteKey("comment", String(binding.id), String(createdComment.id));
+          loopPreventionStore.recordWrite(
+            writeKey,
+            createdComment.updatedAt ?? createdComment.createdAt
+          );
+        }
+
+        for (const updatedComment of pushCommentsResult.updatedComments) {
+          const writeKey = createWriteKey("comment", String(binding.id), String(updatedComment.id));
+          loopPreventionStore.recordWrite(
+            writeKey,
+            updatedComment.updatedAt ?? updatedComment.createdAt
+          );
+        }
+
+        const updatedRuntimeState = recordSuccess(runtimeState, null);
+        runtimeStore.save(updatedRuntimeState);
+        bindingStatuses.set(
+          binding.id,
+          updateBindingStatusIdle(getOrCreateBindingStatus(binding.id))
+        );
+
+        logger.info("push completed", {
+          ...logContext,
+          itemId: `${lastPushResult.createdIssues.length} created, ${lastPushResult.updatedIssues.length} updated`,
+        });
+
+        return { commentLinks: pushCommentsResult.commentLinks };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const failedState = recordFailure(runtimeState, errorMessage, retryConfig);
+        runtimeStore.save(failedState);
+        bindingStatuses.set(
+          binding.id,
+          updateBindingStatusError(getOrCreateBindingStatus(binding.id), errorMessage)
+        );
+
+        logger.error("push failed", logContext, errorMessage);
+        throw error;
+      }
     },
     mapToTask(external: ExternalTask, project: Project): Task {
       return {
@@ -208,6 +381,7 @@ export function createGitHubSyncProvider(
         commentLinks: commentLinkStore.listAll(),
         lastPullResult,
         lastPushResult,
+        bindingStatuses,
       };
     },
   };
