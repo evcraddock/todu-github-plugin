@@ -22,10 +22,12 @@ import {
   GitHubProviderConfigError,
   createGitHubIssueUpdateFromTask,
   createGitHubSyncProvider,
+  createInMemoryBindingRuntimeStore,
   createInMemoryGitHubCommentLinkStore,
   createInMemoryGitHubIssueClient,
   createInMemoryGitHubItemLinkStore,
   createLinkFromTask,
+  createLoopPreventionStore,
   formatAttributedBody,
   formatGitHubAttribution,
   formatToduAttribution,
@@ -534,7 +536,7 @@ describe("createGitHubSyncProvider", () => {
         ],
         createProject()
       )
-    ).resolves.toEqual({ commentLinks: [] });
+    ).resolves.toEqual({ commentLinks: [], taskLinks: [] });
     await expect(
       provider.pull(createBinding({ strategy: "none" }), createProject())
     ).resolves.toEqual({
@@ -669,7 +671,7 @@ describe("comment sync", () => {
     expect(result.commentLinks).toHaveLength(1);
     expect(result.commentLinks[0]).toMatchObject({
       localNoteId: createNoteId("note-1"),
-      externalTaskId: "evcraddock/todu-github-plugin#1",
+      externalTaskId: createTaskId("task-1"),
     });
 
     const ghComments = issueClient.snapshotComments(repositoryTarget(), 1);
@@ -1008,6 +1010,617 @@ describe("comment sync", () => {
 
     const ghComments = issueClient.snapshotComments(repositoryTarget(), 1);
     expect(ghComments).toHaveLength(3);
+  });
+});
+
+describe("runtime integration", () => {
+  it("records success in runtime store after a successful pull", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({ number: 1, title: "Issue", state: "open", labels: ["status:active"] }),
+    ]);
+    const runtimeStore = createInMemoryBindingRuntimeStore();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+      runtimeStore,
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    await provider.pull(createBinding(), createProject());
+
+    const state = runtimeStore.get(createBinding().id);
+    expect(state).not.toBeNull();
+    expect(state!.retryAttempt).toBe(0);
+    expect(state!.lastSuccessAt).not.toBeNull();
+    expect(state!.lastError).toBeNull();
+  });
+
+  it("records failure in runtime store when pull throws", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    const originalListIssues = issueClient.listIssues.bind(issueClient);
+    let shouldFail = true;
+    issueClient.listIssues = async (target) => {
+      if (shouldFail) {
+        throw new Error("API rate limit exceeded");
+      }
+
+      return originalListIssues(target);
+    };
+
+    const runtimeStore = createInMemoryBindingRuntimeStore();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+      runtimeStore,
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await expect(provider.pull(createBinding(), createProject())).rejects.toThrow(
+      "API rate limit exceeded"
+    );
+
+    const state = runtimeStore.get(createBinding().id);
+    expect(state).not.toBeNull();
+    expect(state!.retryAttempt).toBe(1);
+    expect(state!.lastError).toBe("API rate limit exceeded");
+    expect(state!.nextRetryAt).not.toBeNull();
+
+    shouldFail = false;
+  });
+
+  it("skips pull when retry backoff has not elapsed", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({ number: 1, title: "Issue", state: "open", labels: ["status:active"] }),
+    ]);
+
+    const originalListIssues = issueClient.listIssues.bind(issueClient);
+    let callCount = 0;
+    issueClient.listIssues = async (target) => {
+      callCount++;
+      if (callCount === 1) {
+        throw new Error("transient error");
+      }
+
+      return originalListIssues(target);
+    };
+
+    const runtimeStore = createInMemoryBindingRuntimeStore();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+      runtimeStore,
+      retryConfig: { initialSeconds: 3600, maxSeconds: 3600 },
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await expect(provider.pull(createBinding(), createProject())).rejects.toThrow();
+
+    const result = await provider.pull(createBinding(), createProject());
+    expect(result.tasks).toEqual([]);
+    expect(callCount).toBe(1);
+  });
+
+  it("records loop prevention writes during push", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    const loopPreventionStore = createLoopPreventionStore();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+      loopPreventionStore,
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await provider.push(
+      createBinding(),
+      [
+        createTaskWithDetail({
+          id: "task-loop",
+          title: "Loop test",
+          status: "active",
+        }),
+      ],
+      createProject()
+    );
+
+    const writes = loopPreventionStore.listAll();
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes[0].key).toContain("issue:");
+  });
+
+  it("updates binding status through running → idle on success", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({ number: 1, title: "Issue", state: "open", labels: ["status:active"] }),
+    ]);
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    await provider.pull(createBinding(), createProject());
+
+    const state = provider.getState();
+    const status = state.bindingStatuses.get(createBinding().id);
+    expect(status).toBeDefined();
+    expect(status!.state).toBe("idle");
+    expect(status!.lastSuccessAt).not.toBeNull();
+  });
+
+  it("updates binding status to error on failure", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.listIssues = async () => {
+      throw new Error("network failure");
+    };
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    await expect(provider.pull(createBinding(), createProject())).rejects.toThrow();
+
+    const state = provider.getState();
+    const status = state.bindingStatuses.get(createBinding().id);
+    expect(status).toBeDefined();
+    expect(status!.state).toBe("error");
+    expect(status!.lastErrorSummary).toBe("network failure");
+  });
+
+  it("resets retry state after a successful cycle following a failure", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({ number: 1, title: "Issue", state: "open", labels: ["status:active"] }),
+    ]);
+
+    let shouldFail = true;
+    const originalListIssues = issueClient.listIssues.bind(issueClient);
+    issueClient.listIssues = async (target) => {
+      if (shouldFail) {
+        throw new Error("transient");
+      }
+
+      return originalListIssues(target);
+    };
+
+    const runtimeStore = createInMemoryBindingRuntimeStore();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+      runtimeStore,
+      retryConfig: { initialSeconds: 0, maxSeconds: 0 },
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    await expect(provider.pull(createBinding(), createProject())).rejects.toThrow();
+
+    const failedState = runtimeStore.get(createBinding().id);
+    expect(failedState!.retryAttempt).toBe(1);
+
+    shouldFail = false;
+    await provider.pull(createBinding(), createProject());
+
+    const successState = runtimeStore.get(createBinding().id);
+    expect(successState!.retryAttempt).toBe(0);
+    expect(successState!.lastError).toBeNull();
+    expect(successState!.lastSuccessAt).not.toBeNull();
+  });
+});
+
+describe("reopen and close transitions", () => {
+  it("imports a reopened issue as an open status", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Reopened issue",
+        state: "open",
+        labels: ["status:active"],
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const binding = createBinding();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(binding, createProject());
+
+    expect(result.tasks[0].status).toBe("active");
+  });
+
+  it("maps a closed issue without status label to done", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({ number: 1, title: "Closed no label", state: "closed", labels: [] }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const binding = createBinding();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(binding, createProject());
+
+    expect(result.tasks[0].status).toBe("done");
+  });
+
+  it("maps a closed canceled issue to canceled", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Canceled",
+        state: "closed",
+        labels: ["status:canceled"],
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const binding = createBinding();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(binding, createProject());
+
+    expect(result.tasks[0].status).toBe("canceled");
+  });
+
+  it("pushes a done task as a closed issue with status:done label", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "To close",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+        updatedAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const binding = createBinding();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await provider.push(
+      binding,
+      [
+        createTaskWithDetail({
+          id: "task-1",
+          title: "To close",
+          status: "done",
+          updatedAt: "2026-03-10T01:00:00.000Z",
+        }),
+      ],
+      createProject()
+    );
+
+    const issues = issueClient.snapshotIssues(repositoryTarget());
+    expect(issues[0].state).toBe("closed");
+    expect(issues[0].labels).toContain("status:done");
+  });
+
+  it("pushes a canceled task as a closed issue with status:canceled label", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "To cancel",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+        updatedAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const binding = createBinding();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await provider.push(
+      binding,
+      [
+        createTaskWithDetail({
+          id: "task-1",
+          title: "To cancel",
+          status: "canceled",
+          updatedAt: "2026-03-10T01:00:00.000Z",
+        }),
+      ],
+      createProject()
+    );
+
+    const issues = issueClient.snapshotIssues(repositoryTarget());
+    expect(issues[0].state).toBe("closed");
+    expect(issues[0].labels).toContain("status:canceled");
+  });
+});
+
+describe("label normalization edge cases", () => {
+  it("normalizes conflicting open status labels using precedence active > inprogress > waiting", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Multi status",
+        state: "open",
+        labels: ["status:waiting", "status:active", "status:inprogress"],
+      }),
+    ]);
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(createBinding(), createProject());
+
+    expect(result.tasks[0].status).toBe("active");
+  });
+
+  it("normalizes conflicting closed status labels using precedence done > canceled", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Multi closed status",
+        state: "closed",
+        labels: ["status:canceled", "status:done"],
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const binding = createBinding();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(binding, createProject());
+
+    expect(result.tasks[0].status).toBe("done");
+  });
+
+  it("trusts GitHub closed state over open status label", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Closed but labeled active",
+        state: "closed",
+        labels: ["status:active"],
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const binding = createBinding();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(binding, createProject());
+
+    expect(result.tasks[0].status).toBe("done");
+  });
+
+  it("strips reserved labels from normal labels in pull", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Mixed labels",
+        state: "open",
+        labels: ["bug", "status:active", "priority:high", "enhancement"],
+      }),
+    ]);
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(createBinding(), createProject());
+
+    expect(result.tasks[0].labels).toEqual(["bug", "enhancement"]);
+    expect(result.tasks[0].labels).not.toContain("status:active");
+    expect(result.tasks[0].labels).not.toContain("priority:high");
+  });
+
+  it("defaults priority to medium when no priority label is present", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "No priority",
+        state: "open",
+        labels: ["status:active"],
+      }),
+    ]);
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(createBinding(), createProject());
+
+    expect(result.tasks[0].priority).toBe("medium");
+  });
+});
+
+describe("multi-cycle steady-state sync", () => {
+  it("pull then push then pull again produces consistent state", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Steady state issue",
+        state: "open",
+        labels: ["status:active", "priority:medium", "bug"],
+        updatedAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    const firstPull = await provider.pull(createBinding(), createProject());
+    expect(firstPull.tasks).toHaveLength(1);
+    expect(firstPull.tasks[0].title).toBe("Steady state issue");
+
+    await provider.push(
+      createBinding(),
+      [
+        createTaskWithDetail({
+          id: "task-new",
+          title: "New from todu",
+          status: "active",
+        }),
+      ],
+      createProject()
+    );
+
+    expect(issueClient.snapshotIssues(repositoryTarget())).toHaveLength(2);
+
+    const secondPull = await provider.pull(createBinding(), createProject());
+    expect(secondPull.tasks).toHaveLength(2);
+  });
+
+  it("updates from both sides converge after multiple cycles", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Original title",
+        body: "Original body",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+        updatedAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await provider.pull(createBinding(), createProject());
+
+    await provider.push(
+      createBinding(),
+      [
+        createTaskWithDetail({
+          id: "github:evcraddock/todu-github-plugin#1",
+          title: "Updated title",
+          description: "Updated body",
+          status: "inprogress",
+          priority: "high",
+          labels: ["bug"],
+          updatedAt: "2026-03-10T02:00:00.000Z",
+        }),
+      ],
+      createProject()
+    );
+
+    const issues = issueClient.snapshotIssues(repositoryTarget());
+    expect(issues[0].title).toBe("Updated title");
+    expect(issues[0].labels).toContain("status:inprogress");
+    expect(issues[0].labels).toContain("priority:high");
+
+    const finalPull = await provider.pull(createBinding(), createProject());
+    expect(finalPull.tasks[0].title).toBe("Updated title");
+    expect(finalPull.tasks[0].status).toBe("inprogress");
+    expect(finalPull.tasks[0].priority).toBe("high");
+  });
+});
+
+describe("failure path coverage", () => {
+  it("propagates issue client errors from pull without corrupting state", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.listIssues = async () => {
+      throw new Error("GitHub 500");
+    };
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await expect(provider.pull(createBinding(), createProject())).rejects.toThrow("GitHub 500");
+
+    expect(provider.getState().lastPullResult).toBeNull();
+  });
+
+  it("propagates issue client errors from push without corrupting state", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.createIssue = async () => {
+      throw new Error("GitHub 502");
+    };
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await expect(
+      provider.push(
+        createBinding(),
+        [createTaskWithDetail({ id: "task-fail", title: "Fail", status: "active" })],
+        createProject()
+      )
+    ).rejects.toThrow("GitHub 502");
+
+    expect(provider.getState().lastPushResult).toBeNull();
+  });
+
+  it("throws when pull is called before initialize", async () => {
+    const provider = createGitHubSyncProvider();
+
+    await expect(provider.pull(createBinding(), createProject())).rejects.toThrow(
+      /not initialized/
+    );
+  });
+
+  it("throws when push is called before initialize", async () => {
+    const provider = createGitHubSyncProvider();
+
+    await expect(provider.push(createBinding(), [], createProject())).rejects.toThrow(
+      /not initialized/
+    );
   });
 });
 

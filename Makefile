@@ -9,6 +9,10 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 dev: ## Start the dev environment (daemonized)
+	@if [ ! -f $(DEV_CONFIG) ]; then \
+		echo "Creating $(DEV_CONFIG) from template..."; \
+		cp $(DEV_CONFIG).template $(DEV_CONFIG); \
+	fi
 	@if [ -S $(SOCKET) ] && overmind ps -s $(SOCKET) > /dev/null 2>&1; then \
 		echo "Dev environment already running"; \
 		overmind ps -s $(SOCKET); \
@@ -31,8 +35,8 @@ dev-status: ## Check if dev environment is running
 		echo "stopped"; \
 	fi
 
-dev-logs: ## Stream all logs (Ctrl+C to stop)
-	overmind echo -s $(SOCKET)
+dev-logs: ## Connect to overmind log output (Ctrl+C to detach)
+	overmind connect -s $(SOCKET)
 
 dev-tail: ## Show last 100 lines of logs (non-blocking)
 	@if [ -S $(SOCKET) ]; then \

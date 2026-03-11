@@ -1,0 +1,14 @@
+# Project-local development config for the isolated toduai daemon and CLI.
+# Copy this to dev.toduai.yaml and fill in your token:
+#   cp config/dev.toduai.yaml.template config/dev.toduai.yaml
+#   make dev-cli CMD="plugin config github --set '{\"settings\":{\"token\":\"ghp_xxx\"},\"intervalSeconds\":30}'"
+#
+# Note: absolute plugin path required because the Bun-compiled daemon
+# does not resolve relative paths from the config file location.
+
+data_dir: ../.dev/todu/data
+
+daemon:
+  plugins:
+    paths:
+      - /home/erik/Private/code/github/evcraddock/todu-github-plugin/dist/index.js

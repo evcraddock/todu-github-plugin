@@ -181,11 +181,7 @@ export async function pushComments(input: {
       continue;
     }
 
-    const externalTaskId = formatIssueExternalId({
-      owner: input.owner,
-      repo: input.repo,
-      issueNumber: itemLink.issueNumber,
-    });
+    const localTaskId = task.id;
 
     const existingCommentLinks = input.commentLinkStore.listByTask(input.binding.id, task.id);
 
@@ -213,7 +209,7 @@ export async function pushComments(input: {
           updatedComments
         );
         commentLinks.push(
-          createPushCommentLink(note.id, existingLink.githubCommentId, externalTaskId, updated)
+          createPushCommentLink(note.id, existingLink.githubCommentId, localTaskId, updated)
         );
       } else {
         const created = await createGitHubCommentFromNote(
@@ -223,7 +219,7 @@ export async function pushComments(input: {
           itemLink,
           createdComments
         );
-        commentLinks.push(createPushCommentLink(note.id, created.id, externalTaskId, created));
+        commentLinks.push(createPushCommentLink(note.id, created.id, localTaskId, created));
       }
     }
   }

@@ -36,6 +36,7 @@ export {
   type GitHubIssueClient,
   type InMemoryGitHubIssueClient,
 } from "@/github-client";
+export { createHttpGitHubIssueClient } from "@/github-http-client";
 export {
   createFileGitHubItemLinkStore,
   createInMemoryGitHubItemLinkStore,

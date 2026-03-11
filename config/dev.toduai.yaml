@@ -1,4 +1,0 @@
-# Project-local development config for the isolated toduai daemon and CLI.
-# Paths are resolved relative to this file.
-
-data_dir: ../.dev/todu/data
