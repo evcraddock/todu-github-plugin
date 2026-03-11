@@ -1514,7 +1514,9 @@ describe("multi-cycle steady-state sync", () => {
     expect(issueClient.snapshotIssues(repositoryTarget())).toHaveLength(2);
 
     const secondPull = await provider.pull(createBinding(), createProject());
-    expect(secondPull.tasks).toHaveLength(2);
+    // Incremental: only the newly created issue is returned (updated since last success)
+    expect(secondPull.tasks).toHaveLength(1);
+    expect(secondPull.tasks[0].title).toBe("New from todu");
   });
 
   it("updates from both sides converge after multiple cycles", async () => {
@@ -1561,6 +1563,130 @@ describe("multi-cycle steady-state sync", () => {
     expect(finalPull.tasks[0].title).toBe("Updated title");
     expect(finalPull.tasks[0].status).toBe("inprogress");
     expect(finalPull.tasks[0].priority).toBe("high");
+  });
+});
+
+describe("incremental sync", () => {
+  it("first pull fetches all issues (no since parameter)", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Old issue",
+        state: "open",
+        labels: ["status:active"],
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      }),
+      createIssue({
+        number: 2,
+        title: "New issue",
+        state: "open",
+        labels: ["status:active"],
+        updatedAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(createBinding(), createProject());
+
+    expect(result.tasks).toHaveLength(2);
+  });
+
+  it("subsequent pull only fetches issues updated since last success", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Unchanged issue",
+        state: "open",
+        labels: ["status:active"],
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      }),
+    ]);
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    const firstPull = await provider.pull(createBinding(), createProject());
+    expect(firstPull.tasks).toHaveLength(1);
+
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Unchanged issue",
+        state: "open",
+        labels: ["status:active"],
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      }),
+      createIssue({
+        number: 2,
+        title: "Newly created issue",
+        state: "open",
+        labels: ["status:active"],
+        updatedAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ]);
+
+    const secondPull = await provider.pull(createBinding(), createProject());
+    // Only the new issue is returned (updated after first pull's success timestamp)
+    expect(secondPull.tasks).toHaveLength(1);
+    expect(secondPull.tasks[0].title).toBe("Newly created issue");
+  });
+
+  it("pulls all issues after a failed cycle resets since", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Issue",
+        state: "open",
+        labels: ["status:active"],
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      }),
+    ]);
+
+    let shouldFail = false;
+    const originalListIssues = issueClient.listIssues.bind(issueClient);
+    issueClient.listIssues = async (target, options) => {
+      if (shouldFail) {
+        throw new Error("transient");
+      }
+
+      return originalListIssues(target, options);
+    };
+
+    const runtimeStore = createInMemoryBindingRuntimeStore();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+      runtimeStore,
+      retryConfig: { initialSeconds: 0, maxSeconds: 0 },
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    // First pull succeeds, sets lastSuccessAt
+    const firstPull = await provider.pull(createBinding(), createProject());
+    expect(firstPull.tasks).toHaveLength(1);
+
+    // Second pull fails
+    shouldFail = true;
+    await expect(provider.pull(createBinding(), createProject())).rejects.toThrow();
+
+    // Failure doesn't update lastSuccessAt, so next pull still uses the old timestamp
+    shouldFail = false;
+    const thirdPull = await provider.pull(createBinding(), createProject());
+    // Issue hasn't changed since first success, so incremental returns nothing
+    expect(thirdPull.tasks).toHaveLength(0);
   });
 });
 

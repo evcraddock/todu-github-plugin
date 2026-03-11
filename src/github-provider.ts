@@ -207,6 +207,7 @@ export function createGitHubSyncProvider(
           repo: parsedBinding.repo,
           issueClient,
           linkStore,
+          since: runtimeState.lastSuccessAt ?? undefined,
         });
 
         const pullCommentsResult = await pullComments({
