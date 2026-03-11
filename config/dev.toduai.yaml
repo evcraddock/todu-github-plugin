@@ -1,4 +1,10 @@
 # Project-local development config for the isolated toduai daemon and CLI.
-# Paths are resolved relative to this file.
+# Note: absolute plugin path required because the Bun-compiled daemon
+# does not resolve relative paths from the config file location.
 
 data_dir: ../.dev/todu/data
+
+daemon:
+  plugins:
+    paths:
+      - /home/erik/Private/code/github/evcraddock/todu-github-plugin/dist/index.js

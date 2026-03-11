@@ -10,8 +10,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "build:watch": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "build": "tsc -p tsconfig.build.json && esbuild src/index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --packages=bundle",
+    "build:watch": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "lint": "eslint .",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
@@ -25,6 +25,7 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.3.5",
     "@vitest/coverage-v8": "^4.0.18",
+    "esbuild": "^0.27.3",
     "eslint": "^10.0.3",
     "prettier": "^3.8.1",
     "typescript": "^5.9.3",

@@ -2,4 +2,5 @@
 # Uses an isolated project-local toduai config and data directory.
 
 build: npm run build:watch
+bundle: sleep 3 && npx esbuild src/index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --packages=bundle --watch
 daemon: mkdir -p ./.dev/todu/data && toduai --config ./config/dev.toduai.yaml daemon run

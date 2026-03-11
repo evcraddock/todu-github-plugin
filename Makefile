@@ -31,8 +31,8 @@ dev-status: ## Check if dev environment is running
 		echo "stopped"; \
 	fi
 
-dev-logs: ## Stream all logs (Ctrl+C to stop)
-	overmind echo -s $(SOCKET)
+dev-logs: ## Connect to overmind log output (Ctrl+C to detach)
+	overmind connect -s $(SOCKET)
 
 dev-tail: ## Show last 100 lines of logs (non-blocking)
 	@if [ -S $(SOCKET) ]; then \
