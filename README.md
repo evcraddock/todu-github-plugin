@@ -13,16 +13,13 @@ npm install
 npm run build
 ```
 
-### 2. Register the plugin
+### 2. Install the plugin
 
-Add the built plugin path to your toduai daemon config under `daemon.plugins.paths`:
-
-```yaml
-daemon:
-  plugins:
-    paths:
-      - /absolute/path/to/todu-github-plugin/dist/index.js
+```bash
+toduai plugin install /absolute/path/to/todu-github-plugin/dist/index.js
 ```
+
+This registers the plugin with the toduai daemon. Use the actual path where you cloned the repo.
 
 ### 3. Configure your GitHub token
 
