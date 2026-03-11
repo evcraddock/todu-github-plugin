@@ -81,3 +81,40 @@ export {
   type PullCommentsResult,
   type PushCommentsResult,
 } from "@/github-comments";
+export {
+  computeNextRetryDelay,
+  createFileBindingRuntimeStore,
+  createInMemoryBindingRuntimeStore,
+  createInitialRuntimeState,
+  recordFailure,
+  recordSuccess,
+  shouldRetry,
+  type BindingRuntimeState,
+  type BindingRuntimeStore,
+  type RetryConfig,
+} from "@/github-runtime";
+export {
+  createLoopPreventionStore,
+  createWriteKey,
+  type LoopPreventionStore,
+  type WriteRecord,
+} from "@/github-loop-prevention";
+export {
+  createBindingStatus,
+  updateBindingStatusBlocked,
+  updateBindingStatusError,
+  updateBindingStatusIdle,
+  updateBindingStatusRunning,
+  type BindingStatus,
+  type BindingStatusState,
+} from "@/github-binding-status";
+export {
+  createGitHubSyncLogger,
+  formatLogEntry,
+  type GitHubSyncLogger,
+  type LogLevel,
+  type SyncDirection,
+  type SyncEntityType,
+  type SyncLogContext,
+  type SyncLogEntry,
+} from "@/github-logger";
