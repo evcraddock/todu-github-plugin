@@ -4,66 +4,108 @@ A todu plugin that syncs GitHub issues to the todu system.
 
 ## Prerequisites
 
-- Node.js 20+ or Bun 1.0+
+- Node.js 20+
+- toduai CLI installed (`toduai --version`)
+- overmind (process manager for dev environment)
 
 ## Installation
 
 ```bash
 npm install
-# or
-bun install
 ```
 
-## How to Work on This Project
+## Getting Started
 
-### Local Dev Environment
+### 1. Build the plugin
 
-The repo uses an isolated local `toduai` development environment.
+```bash
+npm run build
+```
 
-- Dev config file: `config/dev.toduai.yaml`
-- Dev runtime data: `.dev/todu/data/`
-- Dev daemon socket: `.dev/todu/data/daemon.sock`
+This produces `dist/index.js` (bundled ESM) and `dist/index.d.ts` (type declarations).
 
-This keeps local development separate from any normal `toduai` daemon already running on the machine.
-
-The `.dev/` runtime directory is intentionally gitignored.
-
-### Start the Dev Environment
+### 2. Start the dev environment
 
 ```bash
 make dev
 ```
 
-This starts all services defined in `Procfile.dev` and returns immediately.
+This starts three services via overmind:
 
-Current services:
+- `build` — watches TypeScript sources and rebuilds declarations
+- `bundle` — watches and re-bundles `dist/index.js` via esbuild
+- `daemon` — runs an isolated `toduai` daemon using `config/dev.toduai.yaml`
 
-- `build` - watches and rebuilds the plugin
-- `daemon` - runs an isolated local `toduai` daemon using `config/dev.toduai.yaml`
+The dev environment uses a project-local data directory (`.dev/todu/data/`) that is completely separate from any normal `toduai` daemon on the machine.
 
-### View Logs
+### 3. Verify the plugin loaded
 
 ```bash
-# Stream all logs (Ctrl+C to stop)
+make dev-cli CMD="plugin list"
+```
+
+You should see the `github` plugin listed with status `ok`. The plugin path is configured in `config/dev.toduai.yaml` under `daemon.plugins.paths`.
+
+### 4. Configure the GitHub token
+
+```bash
+make dev-cli CMD="plugin config github --set '{\"token\": \"ghp_your_token_here\"}'"
+```
+
+This stores the token in the dev daemon's plugin config. The daemon must be restarted for the provider to pick up new config:
+
+```bash
+make dev-stop && make dev
+```
+
+In production, plugin config is provided through the `TODUAI_DAEMON_PLUGIN_CONFIG` environment variable as a JSON object — no config file needed.
+
+### 5. Create a test project
+
+```bash
+make dev-cli CMD="project create --name my-test-project"
+```
+
+Note the project ID from the output.
+
+### 6. Add a GitHub integration binding
+
+```bash
+make dev-cli CMD="integration add --provider github --project my-test-project --target-kind repository --target owner/repo --strategy bidirectional"
+```
+
+Replace `owner/repo` with the GitHub repository you want to sync.
+
+### 7. Verify sync
+
+```bash
+make dev-cli CMD="integration status"
+```
+
+Check the daemon logs for sync activity:
+
+```bash
 make dev-logs
-
-# Quick peek at recent logs
-make dev-tail
 ```
 
-### Check Process Status
+## Dev Environment Reference
+
+### Start / Stop
 
 ```bash
-make dev-status
+make dev          # Start all services (daemonized)
+make dev-stop     # Stop all services
+make dev-status   # Check if running
 ```
 
-### Check Dev Daemon Status via CLI
+### Logs
 
 ```bash
-make dev-daemon-status
+make dev-logs     # Connect to overmind log output (Ctrl+C to detach)
+make dev-tail     # Quick peek at recent logs
 ```
 
-### Run `toduai` Against the Dev Daemon
+### Run commands against the dev daemon
 
 ```bash
 # Generic wrapper
@@ -72,6 +114,7 @@ make dev-cli CMD="project list"
 make dev-cli CMD="integration list"
 
 # Convenience targets
+make dev-daemon-status
 make dev-projects
 make dev-integrations
 ```
@@ -80,43 +123,60 @@ You can also call the CLI directly:
 
 ```bash
 toduai --config ./config/dev.toduai.yaml daemon status
-toduai --config ./config/dev.toduai.yaml project list
-toduai --config ./config/dev.toduai.yaml integration list
 ```
 
-### Stop the Dev Environment
-
-```bash
-make dev-stop
-```
-
-### Run Tests and Linting
-
-```bash
-make check
-```
-
-### Before Opening a PR
-
-```bash
-make pre-pr
-```
-
-### Available Make Commands
+### Available make commands
 
 ```bash
 make help
 ```
 
-## Manual Setup Notes
+## Testing
 
-- Copy `.env.example` to `.env` if you want local overrides such as `TODUAI_LOG_LEVEL`.
-- The dev environment is intentionally minimal and does not include an Automerge sync server or multi-machine simulation.
-- The daemon is isolated and ready for plugin development work. Actual GitHub provider loading will be added as the implementation tasks introduce the provider runtime.
+### Unit tests
 
-## Starter Code
+```bash
+npm test                  # Run all unit tests
+npm run test:watch        # Watch mode
+npm run test:coverage     # With coverage report
+```
 
-The initial scaffold includes a tiny issue identifier helper in `src/index.ts` so linting, type-checking, and tests have a real project module to exercise.
+### Integration tests
+
+Integration tests run against a real GitHub repository ([evcraddock/todu-github-plugin-test](https://github.com/evcraddock/todu-github-plugin-test)) and require a GitHub token:
+
+```bash
+TODU_PLUGIN_GITHUB_TOKEN=ghp_xxx npm run test:integration
+```
+
+These tests are skipped when `TODU_PLUGIN_GITHUB_TOKEN` is not set.
+
+### All checks
+
+```bash
+make check        # Lint + unit tests
+make pre-pr       # Full pre-PR checks (format, lint, typecheck, test)
+```
+
+## Build
+
+```bash
+npm run build       # Full build (declarations + bundle)
+npm run typecheck   # Type check only (no emit)
+npm run lint        # ESLint
+npm run format      # Prettier
+```
+
+The build uses:
+
+- `tsc` for type declarations only (`tsconfig.build.json`)
+- `esbuild` to bundle `src/index.ts` into a single `dist/index.js` with all dependencies inlined
+
+Bundling is required because the `toduai` daemon is a compiled Bun binary that cannot resolve `node_modules` from dynamically imported plugin files.
+
+## Architecture
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 
 ## License
 
