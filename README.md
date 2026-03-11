@@ -24,7 +24,15 @@ npm run build
 
 This produces `dist/index.js` (bundled ESM) and `dist/index.d.ts` (type declarations).
 
-### 2. Start the dev environment
+### 2. Set up the dev config
+
+```bash
+cp config/dev.toduai.yaml.template config/dev.toduai.yaml
+```
+
+The dev config file is gitignored because `toduai plugin config` writes secrets into it.
+
+### 3. Start the dev environment
 
 ```bash
 make dev
@@ -38,7 +46,7 @@ This starts three services via overmind:
 
 The dev environment uses a project-local data directory (`.dev/todu/data/`) that is completely separate from any normal `toduai` daemon on the machine.
 
-### 3. Verify the plugin loaded
+### 4. Verify the plugin loaded
 
 ```bash
 make dev-cli CMD="plugin list"
@@ -46,7 +54,7 @@ make dev-cli CMD="plugin list"
 
 You should see the `github` plugin listed with status `ok`. The plugin path is configured in `config/dev.toduai.yaml` under `daemon.plugins.paths`.
 
-### 4. Configure the GitHub token
+### 5. Configure the GitHub token
 
 ```bash
 make dev-cli CMD="plugin config github --set '{\"settings\":{\"token\":\"ghp_your_token_here\"},\"intervalSeconds\":30}'"
@@ -62,7 +70,7 @@ make dev-stop && make dev
 
 In production, plugin config is provided through the `TODUAI_DAEMON_PLUGIN_CONFIG` environment variable as a JSON object — no config file needed.
 
-### 5. Create a test project
+### 6. Create a test project
 
 ```bash
 make dev-cli CMD="project create --name my-test-project"
@@ -70,7 +78,7 @@ make dev-cli CMD="project create --name my-test-project"
 
 Note the project ID from the output.
 
-### 6. Add a GitHub integration binding
+### 7. Add a GitHub integration binding
 
 ```bash
 make dev-cli CMD="integration add --provider github --project my-test-project --target-kind repository --target owner/repo --strategy bidirectional"
@@ -78,7 +86,7 @@ make dev-cli CMD="integration add --provider github --project my-test-project --
 
 Replace `owner/repo` with the GitHub repository you want to sync.
 
-### 7. Verify sync
+### 8. Verify sync
 
 ```bash
 make dev-cli CMD="integration status"

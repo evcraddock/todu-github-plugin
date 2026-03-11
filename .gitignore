@@ -30,5 +30,8 @@ coverage/
 # Local development runtime state
 .dev/
 
+# Dev config contains secrets (use dev.toduai.yaml.template)
+config/dev.toduai.yaml
+
 # Plugin runtime data
 .todu-github-plugin/
