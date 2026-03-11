@@ -671,7 +671,7 @@ describe("comment sync", () => {
     expect(result.commentLinks).toHaveLength(1);
     expect(result.commentLinks[0]).toMatchObject({
       localNoteId: createNoteId("note-1"),
-      externalTaskId: "evcraddock/todu-github-plugin#1",
+      externalTaskId: createTaskId("task-1"),
     });
 
     const ghComments = issueClient.snapshotComments(repositoryTarget(), 1);
