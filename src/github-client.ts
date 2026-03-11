@@ -38,8 +38,12 @@ export interface UpdateGitHubIssueInput {
   labels?: string[];
 }
 
+export interface ListIssuesOptions {
+  since?: string;
+}
+
 export interface GitHubIssueClient {
-  listIssues(target: GitHubRepositoryTarget): Promise<GitHubIssue[]>;
+  listIssues(target: GitHubRepositoryTarget, options?: ListIssuesOptions): Promise<GitHubIssue[]>;
   getIssue(target: GitHubRepositoryTarget, issueNumber: number): Promise<GitHubIssue | null>;
   createIssue(target: GitHubRepositoryTarget, input: CreateGitHubIssueInput): Promise<GitHubIssue>;
   updateIssue(
@@ -176,9 +180,16 @@ export function createInMemoryGitHubIssueClient(): InMemoryGitHubIssueClient {
     snapshotComments(target, issueNumber): GitHubComment[] {
       return getComments(target, issueNumber).map(cloneComment);
     },
-    async listIssues(target): Promise<GitHubIssue[]> {
+    async listIssues(target, options?): Promise<GitHubIssue[]> {
       return getIssues(target)
         .filter((issue) => !issue.isPullRequest)
+        .filter((issue) => {
+          if (!options?.since || !issue.updatedAt) {
+            return true;
+          }
+
+          return issue.updatedAt >= options.since;
+        })
         .map(cloneIssue);
     },
     async getIssue(target, issueNumber): Promise<GitHubIssue | null> {
