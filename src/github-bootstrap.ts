@@ -44,11 +44,12 @@ export async function bootstrapGitHubIssuesToTasks(input: {
   repo: string;
   issueClient: GitHubIssueClient;
   linkStore: GitHubItemLinkStore;
+  since?: string;
 }): Promise<GitHubBootstrapImportResult> {
-  const issues = await input.issueClient.listIssues({
-    owner: input.owner,
-    repo: input.repo,
-  });
+  const issues = await input.issueClient.listIssues(
+    { owner: input.owner, repo: input.repo },
+    input.since ? { since: input.since } : undefined
+  );
 
   const tasks: ExternalTask[] = [];
   const createdLinks: GitHubItemLink[] = [];

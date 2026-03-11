@@ -4,6 +4,7 @@ import type {
   GitHubComment,
   GitHubIssue,
   GitHubIssueClient,
+  ListIssuesOptions,
   UpdateGitHubIssueInput,
 } from "@/github-client";
 
@@ -126,8 +127,12 @@ export function createHttpGitHubIssueClient(token: string): GitHubIssueClient {
   };
 
   return {
-    async listIssues(target): Promise<GitHubIssue[]> {
-      const path = `/repos/${target.owner}/${target.repo}/issues?state=all`;
+    async listIssues(target, options?: ListIssuesOptions): Promise<GitHubIssue[]> {
+      let path = `/repos/${target.owner}/${target.repo}/issues?state=all`;
+      if (options?.since) {
+        path += `&since=${encodeURIComponent(options.since)}`;
+      }
+
       const rawIssues = await listAllPages<GitHubApiIssue>(path);
       return rawIssues.map((raw) => mapApiIssue(target, raw));
     },

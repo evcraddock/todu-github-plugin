@@ -31,6 +31,7 @@ export {
 export {
   createInMemoryGitHubIssueClient,
   type CreateGitHubIssueInput,
+  type ListIssuesOptions,
   type GitHubComment,
   type GitHubIssue,
   type GitHubIssueClient,
