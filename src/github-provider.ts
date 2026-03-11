@@ -259,13 +259,13 @@ export function createGitHubSyncProvider(
           taskUpdates: [],
         };
         logger.debug("skipping push due to binding strategy", logContext);
-        return { commentLinks: [] };
+        return { commentLinks: [], taskLinks: [] };
       }
 
       const runtimeState = getOrCreateRuntimeState(binding.id);
       if (!shouldRetry(runtimeState)) {
         logger.info("skipping push: retry backoff not elapsed", logContext);
-        return { commentLinks: [] };
+        return { commentLinks: [], taskLinks: [] };
       }
 
       const status = getOrCreateBindingStatus(binding.id);
@@ -336,7 +336,13 @@ export function createGitHubSyncProvider(
           itemId: `${lastPushResult.createdIssues.length} created, ${lastPushResult.updatedIssues.length} updated`,
         });
 
-        return { commentLinks: pushCommentsResult.commentLinks };
+        const taskLinks = lastPushResult.createdLinks.map((link) => ({
+          localTaskId: link.taskId,
+          externalId: link.externalId,
+          sourceUrl: `https://github.com/${parsedBinding.owner}/${parsedBinding.repo}/issues/${link.issueNumber}`,
+        }));
+
+        return { commentLinks: pushCommentsResult.commentLinks, taskLinks };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         const failedState = recordFailure(runtimeState, errorMessage, retryConfig);
@@ -365,7 +371,7 @@ export function createGitHubSyncProvider(
         updatedAt: external.updatedAt ?? external.createdAt ?? DEFAULT_TIMESTAMP,
       };
     },
-    mapFromTask(task: TaskPushPayload): ExternalTask {
+    mapFromTask(task: TaskPushPayload, _project: Project): ExternalTask {
       return {
         externalId: task.externalId ?? String(task.id),
         title: task.title,

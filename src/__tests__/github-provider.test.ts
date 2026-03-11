@@ -536,7 +536,7 @@ describe("createGitHubSyncProvider", () => {
         ],
         createProject()
       )
-    ).resolves.toEqual({ commentLinks: [] });
+    ).resolves.toEqual({ commentLinks: [], taskLinks: [] });
     await expect(
       provider.pull(createBinding({ strategy: "none" }), createProject())
     ).resolves.toEqual({
