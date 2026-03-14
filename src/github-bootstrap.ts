@@ -45,6 +45,7 @@ export async function bootstrapGitHubIssuesToTasks(input: {
   issueClient: GitHubIssueClient;
   linkStore: GitHubItemLinkStore;
   since?: string;
+  importClosedOnBootstrap?: boolean;
 }): Promise<GitHubBootstrapImportResult> {
   const issues = await input.issueClient.listIssues(
     { owner: input.owner, repo: input.repo },
@@ -60,7 +61,7 @@ export async function bootstrapGitHubIssuesToTasks(input: {
     }
 
     const existingLink = input.linkStore.getByIssueNumber(input.binding.id, issue.number);
-    if (!existingLink && issue.state !== "open") {
+    if (!existingLink && issue.state !== "open" && !input.importClosedOnBootstrap) {
       continue;
     }
 

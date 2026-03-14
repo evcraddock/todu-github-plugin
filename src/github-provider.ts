@@ -72,6 +72,7 @@ const DEFAULT_TIMESTAMP = new Date(0).toISOString();
 const OPEN_TASK_STATUSES = new Set(["active", "inprogress", "waiting"]);
 const TASK_PRIORITIES = new Set(["low", "medium", "high"]);
 const DEFAULT_LOOP_PREVENTION_MAX_AGE_MS = 10 * 60 * 1000;
+const IMPORT_CLOSED_ON_BOOTSTRAP_OPTION = "importClosedOnBootstrap";
 
 export interface GitHubProviderState {
   initialized: boolean;
@@ -95,6 +96,10 @@ export interface CreateGitHubSyncProviderOptions {
   loopPreventionStore?: LoopPreventionStore;
   logger?: GitHubSyncLogger;
   retryConfig?: RetryConfig;
+}
+
+function isImportClosedOnBootstrapEnabled(binding: IntegrationBinding): boolean {
+  return binding.options?.[IMPORT_CLOSED_ON_BOOTSTRAP_OPTION] === true;
 }
 
 export function createGitHubSyncProvider(
@@ -208,6 +213,8 @@ export function createGitHubSyncProvider(
           issueClient,
           linkStore,
           since: runtimeState.lastSuccessAt ?? undefined,
+          importClosedOnBootstrap:
+            runtimeState.lastSuccessAt == null && isImportClosedOnBootstrapEnabled(binding),
         });
 
         const pullCommentsResult = await pullComments({

@@ -590,7 +590,7 @@ describe("comment attribution formatting", () => {
 });
 
 describe("comment sync", () => {
-  it("pulls GitHub comments as ExternalComment with attribution", async () => {
+  it("pulls GitHub comments without visible attribution in the note body", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
     issueClient.seedIssues(repositoryTarget(), [
       createIssue({
@@ -622,10 +622,66 @@ describe("comment sync", () => {
     expect(pullResult.comments![0]).toMatchObject({
       externalId: "100",
       externalTaskId: "evcraddock/todu-github-plugin#1",
-      body: expect.stringContaining("_Synced from GitHub comment by @octocat on"),
+      body: "Hello from GitHub",
       author: "octocat",
     });
-    expect(pullResult.comments![0].body).toContain("Hello from GitHub");
+  });
+
+  it("does not push imported GitHub comments back to GitHub when they are tagged", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Issue with imported comment",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 1, [
+      createGitHubComment({
+        id: 100,
+        issueNumber: 1,
+        body: "Hello from GitHub",
+        author: "octocat",
+        createdAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const commentLinkStore = createInMemoryGitHubCommentLinkStore();
+    const binding = createBinding();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore, commentLinkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await provider.pull(binding, createProject());
+
+    const result = await provider.push(
+      binding,
+      [
+        createTaskWithDetail({
+          id: "task-1",
+          title: "Issue with imported comment",
+          status: "active",
+          comments: [
+            createNote({
+              id: "note-imported-1",
+              content: "Hello from GitHub",
+              author: "octocat",
+              tags: ["sync:externalId:100"],
+              createdAt: "2026-03-10T00:00:00.000Z",
+            }),
+          ],
+        }),
+      ],
+      createProject()
+    );
+
+    expect(result.commentLinks).toHaveLength(0);
+    expect(issueClient.snapshotComments(repositoryTarget(), 1)).toHaveLength(1);
   });
 
   it("pushes todu comments to GitHub with todu attribution", async () => {
@@ -1566,6 +1622,134 @@ describe("multi-cycle steady-state sync", () => {
   });
 });
 
+describe("closed bootstrap import", () => {
+  it("keeps default bootstrap behavior and skips unlinked closed issues", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Closed issue",
+        state: "closed",
+        labels: ["status:done"],
+        updatedAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 1, [
+      createGitHubComment({
+        id: 100,
+        issueNumber: 1,
+        body: "Historical comment",
+        author: "octocat",
+        createdAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(createBinding(), createProject());
+
+    expect(result.tasks).toHaveLength(0);
+    expect(result.comments).toHaveLength(0);
+    expect(provider.getState().itemLinks).toHaveLength(0);
+    expect(provider.getState().commentLinks).toHaveLength(0);
+  });
+
+  it("imports closed issues and comments during initial bootstrap when opted in", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Canceled issue",
+        body: "Imported from GitHub",
+        state: "closed",
+        labels: ["status:canceled", "priority:low", "enhancement"],
+        updatedAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 1, [
+      createGitHubComment({
+        id: 100,
+        issueNumber: 1,
+        body: "Historical comment",
+        author: "octocat",
+        createdAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const result = await provider.pull(
+      createBinding({ options: { importClosedOnBootstrap: true } }),
+      createProject()
+    );
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]).toMatchObject({
+      title: "Canceled issue",
+      status: "canceled",
+      priority: "low",
+      labels: ["enhancement"],
+    });
+    expect(result.comments).toHaveLength(1);
+    expect(result.comments![0]).toMatchObject({
+      externalId: "100",
+      externalTaskId: "evcraddock/todu-github-plugin#1",
+      author: "octocat",
+    });
+    expect(result.comments![0].body).toContain("Historical comment");
+    expect(provider.getState().itemLinks).toHaveLength(1);
+    expect(provider.getState().commentLinks).toHaveLength(1);
+  });
+
+  it("limits closed issue bootstrap import to the first successful pull", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    const binding = createBinding({ options: { importClosedOnBootstrap: true } });
+    const firstPull = await provider.pull(binding, createProject());
+    expect(firstPull.tasks).toHaveLength(0);
+
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Closed after bootstrap",
+        state: "closed",
+        labels: ["status:done"],
+        updatedAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 1, [
+      createGitHubComment({
+        id: 101,
+        issueNumber: 1,
+        body: "Should stay unimported",
+        author: "octocat",
+        createdAt: "2026-03-10T01:00:00.000Z",
+      }),
+    ]);
+
+    const secondPull = await provider.pull(binding, createProject());
+
+    expect(secondPull.tasks).toHaveLength(0);
+    expect(secondPull.comments).toHaveLength(0);
+    expect(provider.getState().itemLinks).toHaveLength(0);
+    expect(provider.getState().commentLinks).toHaveLength(0);
+  });
+});
+
 describe("incremental sync", () => {
   it("first pull fetches all issues (no since parameter)", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
@@ -1752,13 +1936,14 @@ describe("failure path coverage", () => {
 
 function createBinding(overrides: Partial<IntegrationBinding> = {}): IntegrationBinding {
   return {
-    id: createIntegrationBindingId("binding-1"),
+    id: overrides.id ?? createIntegrationBindingId("binding-1"),
     provider: overrides.provider ?? GITHUB_PROVIDER_NAME,
     projectId: overrides.projectId ?? createProjectId("project-1"),
     targetKind: overrides.targetKind ?? GITHUB_REPOSITORY_TARGET_KIND,
     targetRef: overrides.targetRef ?? "evcraddock/todu-github-plugin",
     strategy: overrides.strategy ?? "bidirectional",
     enabled: overrides.enabled ?? true,
+    options: overrides.options,
     createdAt: overrides.createdAt ?? "2026-03-09T00:00:00.000Z",
     updatedAt: overrides.updatedAt ?? "2026-03-09T00:00:00.000Z",
   };
@@ -1832,12 +2017,13 @@ function createNote(overrides: {
   content: string;
   author: string;
   createdAt?: string;
+  tags?: string[];
 }): Note {
   return {
     id: createNoteId(overrides.id),
     content: overrides.content,
     author: overrides.author,
-    tags: [],
+    tags: overrides.tags ?? [],
     createdAt: overrides.createdAt ?? "2026-03-10T00:00:00.000Z",
   };
 }
