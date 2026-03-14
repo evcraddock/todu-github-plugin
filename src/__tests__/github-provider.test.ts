@@ -590,7 +590,7 @@ describe("comment attribution formatting", () => {
 });
 
 describe("comment sync", () => {
-  it("pulls GitHub comments as ExternalComment with attribution", async () => {
+  it("pulls GitHub comments without visible attribution in the note body", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
     issueClient.seedIssues(repositoryTarget(), [
       createIssue({
@@ -622,10 +622,66 @@ describe("comment sync", () => {
     expect(pullResult.comments![0]).toMatchObject({
       externalId: "100",
       externalTaskId: "evcraddock/todu-github-plugin#1",
-      body: expect.stringContaining("_Synced from GitHub comment by @octocat on"),
+      body: "Hello from GitHub",
       author: "octocat",
     });
-    expect(pullResult.comments![0].body).toContain("Hello from GitHub");
+  });
+
+  it("does not push imported GitHub comments back to GitHub when they are tagged", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Issue with imported comment",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 1, [
+      createGitHubComment({
+        id: 100,
+        issueNumber: 1,
+        body: "Hello from GitHub",
+        author: "octocat",
+        createdAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const commentLinkStore = createInMemoryGitHubCommentLinkStore();
+    const binding = createBinding();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore, commentLinkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await provider.pull(binding, createProject());
+
+    const result = await provider.push(
+      binding,
+      [
+        createTaskWithDetail({
+          id: "task-1",
+          title: "Issue with imported comment",
+          status: "active",
+          comments: [
+            createNote({
+              id: "note-imported-1",
+              content: "Hello from GitHub",
+              author: "octocat",
+              tags: ["sync:externalId:100"],
+              createdAt: "2026-03-10T00:00:00.000Z",
+            }),
+          ],
+        }),
+      ],
+      createProject()
+    );
+
+    expect(result.commentLinks).toHaveLength(0);
+    expect(issueClient.snapshotComments(repositoryTarget(), 1)).toHaveLength(1);
   });
 
   it("pushes todu comments to GitHub with todu attribution", async () => {
@@ -1961,12 +2017,13 @@ function createNote(overrides: {
   content: string;
   author: string;
   createdAt?: string;
+  tags?: string[];
 }): Note {
   return {
     id: createNoteId(overrides.id),
     content: overrides.content,
     author: overrides.author,
-    tags: [],
+    tags: overrides.tags ?? [],
     createdAt: overrides.createdAt ?? "2026-03-10T00:00:00.000Z",
   };
 }

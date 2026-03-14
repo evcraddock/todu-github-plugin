@@ -16,6 +16,7 @@ const GITHUB_ATTRIBUTION_PREFIX = "_Synced from GitHub comment by @";
 const TODU_ATTRIBUTION_PREFIX = "_Synced from todu comment by @";
 const ATTRIBUTION_SUFFIX_PATTERN = / on \d{4}-\d{2}-\d{2}T[\d:.]+Z_$/;
 const IMPORTED_COMMENT_LINK_PREFIX = "external:";
+const SYNC_EXTERNAL_ID_TAG_PREFIX = "sync:externalId:";
 
 export function formatGitHubAttribution(author: string, timestamp: string): string {
   return `_Synced from GitHub comment by @${author} on ${timestamp}_`;
@@ -57,6 +58,10 @@ export function hasGitHubAttribution(body: string): boolean {
 
 function isImportedCommentLink(link: GitHubCommentLink): boolean {
   return (link.noteId as string).startsWith(IMPORTED_COMMENT_LINK_PREFIX);
+}
+
+function hasImportedGitHubSyncTag(note: Note): boolean {
+  return note.tags.some((tag) => tag.startsWith(SYNC_EXTERNAL_ID_TAG_PREFIX));
 }
 
 export interface PullCommentsResult {
@@ -113,10 +118,7 @@ export async function pullComments(input: {
       comments.push({
         externalId: String(ghComment.id),
         externalTaskId,
-        body: formatAttributedBody(
-          formatGitHubAttribution(ghComment.author, ghComment.createdAt),
-          body
-        ),
+        body,
         author: ghComment.author,
         createdAt: ghComment.createdAt,
         updatedAt: ghComment.updatedAt,
@@ -194,11 +196,11 @@ export async function pushComments(input: {
     }
 
     for (const note of task.comments) {
-      if (hasGitHubAttribution(note.content)) {
+      const existingLink = input.commentLinkStore.getByNoteId(input.binding.id, note.id);
+
+      if (!existingLink && (hasGitHubAttribution(note.content) || hasImportedGitHubSyncTag(note))) {
         continue;
       }
-
-      const existingLink = input.commentLinkStore.getByNoteId(input.binding.id, note.id);
 
       if (existingLink) {
         const updated = await updateGitHubCommentIfNeeded(
