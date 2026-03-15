@@ -31,7 +31,7 @@ import {
   type GitHubBootstrapImportResult,
 } from "@/github-bootstrap";
 import { createInMemoryGitHubIssueClient, type GitHubIssueClient } from "@/github-client";
-import { createHttpGitHubIssueClient } from "@/github-http-client";
+import { createHttpGitHubIssueClient, isGitHubRateLimitError } from "@/github-http-client";
 import {
   createInMemoryGitHubCommentLinkStore,
   type GitHubCommentLink,
@@ -73,6 +73,7 @@ const OPEN_TASK_STATUSES = new Set(["active", "inprogress", "waiting"]);
 const TASK_PRIORITIES = new Set(["low", "medium", "high"]);
 const DEFAULT_LOOP_PREVENTION_MAX_AGE_MS = 10 * 60 * 1000;
 const IMPORT_CLOSED_ON_BOOTSTRAP_OPTION = "importClosedOnBootstrap";
+const RATE_LIMIT_FALLBACK_DELAY_SECONDS = 15 * 60;
 
 export interface GitHubProviderState {
   initialized: boolean;
@@ -100,6 +101,37 @@ export interface CreateGitHubSyncProviderOptions {
 
 function isImportClosedOnBootstrapEnabled(binding: IntegrationBinding): boolean {
   return binding.options?.[IMPORT_CLOSED_ON_BOOTSTRAP_OPTION] === true;
+}
+
+function getRetryOverrideForError(
+  error: unknown
+): { delaySeconds?: number; retryAt?: Date } | undefined {
+  if (!isGitHubRateLimitError(error)) {
+    return undefined;
+  }
+
+  if (error.retryAt != null) {
+    const retryAt = new Date(error.retryAt);
+    if (!Number.isNaN(retryAt.getTime())) {
+      return { retryAt };
+    }
+  }
+
+  return { delaySeconds: RATE_LIMIT_FALLBACK_DELAY_SECONDS };
+}
+
+function getErrorSummary(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (isGitHubRateLimitError(error) && error.retryAt != null) {
+    return `${message} (retry after ${error.retryAt})`;
+  }
+
+  if (isGitHubRateLimitError(error)) {
+    return `${message} (retry delayed due to GitHub rate limit)`;
+  }
+
+  return message;
 }
 
 export function createGitHubSyncProvider(
@@ -243,15 +275,21 @@ export function createGitHubSyncProvider(
           comments: pullCommentsResult.comments,
         };
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        const failedState = recordFailure(runtimeState, errorMessage, retryConfig);
+        const errorSummary = getErrorSummary(error);
+        const failedState = recordFailure(
+          runtimeState,
+          errorSummary,
+          retryConfig,
+          new Date(),
+          getRetryOverrideForError(error)
+        );
         runtimeStore.save(failedState);
         bindingStatuses.set(
           binding.id,
-          updateBindingStatusError(getOrCreateBindingStatus(binding.id), errorMessage)
+          updateBindingStatusError(getOrCreateBindingStatus(binding.id), errorSummary)
         );
 
-        logger.error("pull failed", logContext, errorMessage);
+        logger.error("pull failed", logContext, errorSummary);
         throw error;
       }
     },
@@ -352,15 +390,21 @@ export function createGitHubSyncProvider(
 
         return { commentLinks: pushCommentsResult.commentLinks, taskLinks };
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        const failedState = recordFailure(runtimeState, errorMessage, retryConfig);
+        const errorSummary = getErrorSummary(error);
+        const failedState = recordFailure(
+          runtimeState,
+          errorSummary,
+          retryConfig,
+          new Date(),
+          getRetryOverrideForError(error)
+        );
         runtimeStore.save(failedState);
         bindingStatuses.set(
           binding.id,
-          updateBindingStatusError(getOrCreateBindingStatus(binding.id), errorMessage)
+          updateBindingStatusError(getOrCreateBindingStatus(binding.id), errorSummary)
         );
 
-        logger.error("push failed", logContext, errorMessage);
+        logger.error("push failed", logContext, errorSummary);
         throw error;
       }
     },

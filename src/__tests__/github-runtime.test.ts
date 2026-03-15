@@ -123,6 +123,29 @@ describe("recordFailure", () => {
     const delay = computeNextRetryDelay(state.retryAttempt, config);
     expect(delay).toBe(300);
   });
+
+  it("accepts an explicit retryAt override", () => {
+    const now = new Date("2026-03-10T12:00:00.000Z");
+    const retryAt = new Date("2026-03-10T12:30:00.000Z");
+
+    const state = recordFailure(createInitialRuntimeState(BINDING_ID), "rate limit", config, now, {
+      retryAt,
+    });
+
+    expect(state.retryAttempt).toBe(1);
+    expect(state.nextRetryAt).toBe("2026-03-10T12:30:00.000Z");
+  });
+
+  it("accepts an explicit delay override", () => {
+    const now = new Date("2026-03-10T12:00:00.000Z");
+
+    const state = recordFailure(createInitialRuntimeState(BINDING_ID), "rate limit", config, now, {
+      delaySeconds: 900,
+    });
+
+    expect(state.retryAttempt).toBe(1);
+    expect(state.nextRetryAt).toBe("2026-03-10T12:15:00.000Z");
+  });
 });
 
 describe("shouldRetry", () => {

@@ -30,6 +30,95 @@ interface GitHubApiComment {
   updated_at: string;
 }
 
+export class GitHubApiError extends Error {
+  readonly status: number;
+  readonly method: string;
+  readonly path: string;
+  readonly responseBody: string;
+  readonly isRateLimitError: boolean;
+  readonly retryAt: string | null;
+
+  constructor(input: {
+    status: number;
+    method: string;
+    path: string;
+    responseBody: string;
+    isRateLimitError: boolean;
+    retryAt: string | null;
+  }) {
+    super(`GitHub API ${input.method} ${input.path} failed: ${input.status} ${input.responseBody}`);
+    this.name = "GitHubApiError";
+    this.status = input.status;
+    this.method = input.method;
+    this.path = input.path;
+    this.responseBody = input.responseBody;
+    this.isRateLimitError = input.isRateLimitError;
+    this.retryAt = input.retryAt;
+  }
+}
+
+function parseRetryAtFromHeaders(headers: Headers, now: Date = new Date()): string | null {
+  const retryAfterHeader = headers.get("retry-after");
+  if (retryAfterHeader != null) {
+    const retryAfterSeconds = Number.parseInt(retryAfterHeader, 10);
+    if (!Number.isNaN(retryAfterSeconds) && retryAfterSeconds >= 0) {
+      return new Date(now.getTime() + retryAfterSeconds * 1000).toISOString();
+    }
+  }
+
+  const resetHeader = headers.get("x-ratelimit-reset");
+  if (resetHeader != null) {
+    const resetSeconds = Number.parseInt(resetHeader, 10);
+    if (!Number.isNaN(resetSeconds) && resetSeconds > 0) {
+      return new Date(resetSeconds * 1000).toISOString();
+    }
+  }
+
+  return null;
+}
+
+function isRateLimitResponse(status: number, headers: Headers, responseBody: string): boolean {
+  if (status === 429) {
+    return true;
+  }
+
+  if (status !== 403) {
+    return false;
+  }
+
+  const remainingHeader = headers.get("x-ratelimit-remaining");
+  if (remainingHeader === "0") {
+    return true;
+  }
+
+  return responseBody.toLowerCase().includes("rate limit exceeded");
+}
+
+export function createGitHubApiError(input: {
+  status: number;
+  method: string;
+  path: string;
+  responseBody: string;
+  headers: Headers;
+  now?: Date;
+}): GitHubApiError {
+  const now = input.now ?? new Date();
+  const rateLimitError = isRateLimitResponse(input.status, input.headers, input.responseBody);
+
+  return new GitHubApiError({
+    status: input.status,
+    method: input.method,
+    path: input.path,
+    responseBody: input.responseBody,
+    isRateLimitError: rateLimitError,
+    retryAt: rateLimitError ? parseRetryAtFromHeaders(input.headers, now) : null,
+  });
+}
+
+export function isGitHubRateLimitError(error: unknown): error is GitHubApiError {
+  return error instanceof GitHubApiError && error.isRateLimitError;
+}
+
 function normalizeLabels(labels: GitHubApiIssue["labels"]): string[] {
   return labels.map((label) => (typeof label === "string" ? label : label.name));
 }
@@ -93,7 +182,13 @@ export function createHttpGitHubIssueClient(token: string): GitHubIssueClient {
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new Error(`GitHub API ${method} ${path} failed: ${response.status} ${text}`);
+      throw createGitHubApiError({
+        status: response.status,
+        method,
+        path,
+        responseBody: text,
+        headers: response.headers,
+      });
     }
 
     if (response.status === 204) {

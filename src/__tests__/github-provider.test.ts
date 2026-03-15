@@ -14,6 +14,8 @@ import {
 } from "@todu/core";
 import { describe, expect, it } from "vitest";
 
+import { createGitHubApiError } from "@/github-http-client";
+
 import {
   GITHUB_PROVIDER_NAME,
   GITHUB_REPOSITORY_TARGET_KIND,
@@ -1124,6 +1126,85 @@ describe("runtime integration", () => {
     expect(state!.nextRetryAt).not.toBeNull();
 
     shouldFail = false;
+  });
+
+  it("uses GitHub rate-limit reset metadata to delay the next retry", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    const resetAt = new Date(Date.now() + 5 * 60 * 1000);
+    resetAt.setMilliseconds(0);
+    const resetAtHeader = String(Math.floor(resetAt.getTime() / 1000));
+
+    issueClient.listIssues = async () => {
+      const headers = new Headers({
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": resetAtHeader,
+      });
+
+      throw createGitHubApiError({
+        status: 403,
+        method: "GET",
+        path: "/repos/evcraddock/todu-github-plugin/issues?state=all",
+        responseBody: '{"message":"API rate limit exceeded"}',
+        headers,
+      });
+    };
+
+    const runtimeStore = createInMemoryBindingRuntimeStore();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+      runtimeStore,
+      retryConfig: { initialSeconds: 5, maxSeconds: 60 },
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await expect(provider.pull(createBinding(), createProject())).rejects.toThrow(
+      "API rate limit exceeded"
+    );
+
+    const state = runtimeStore.get(createBinding().id);
+    expect(state).not.toBeNull();
+    expect(state!.retryAttempt).toBe(1);
+    expect(state!.nextRetryAt).toBe(resetAt.toISOString());
+    expect(state!.lastError).toContain(`retry after ${resetAt.toISOString()}`);
+
+    const status = provider.getState().bindingStatuses.get(createBinding().id);
+    expect(status?.lastErrorSummary).toContain(`retry after ${resetAt.toISOString()}`);
+  });
+
+  it("uses a long fallback cooldown when rate-limit metadata is unavailable", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.listIssues = async () => {
+      throw createGitHubApiError({
+        status: 403,
+        method: "GET",
+        path: "/repos/evcraddock/todu-github-plugin/issues?state=all",
+        responseBody: '{"message":"API rate limit exceeded"}',
+        headers: new Headers(),
+        now: new Date("2026-03-10T00:00:00.000Z"),
+      });
+    };
+
+    const runtimeStore = createInMemoryBindingRuntimeStore();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+      runtimeStore,
+      retryConfig: { initialSeconds: 5, maxSeconds: 60 },
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    await expect(provider.pull(createBinding(), createProject())).rejects.toThrow(
+      "API rate limit exceeded"
+    );
+
+    const state = runtimeStore.get(createBinding().id);
+    expect(state).not.toBeNull();
+
+    const retryDelayMs = Date.parse(state!.nextRetryAt!) - Date.parse(state!.lastAttemptAt!);
+    expect(retryDelayMs).toBe(15 * 60 * 1000);
+    expect(state!.lastError).toContain("retry delayed due to GitHub rate limit");
   });
 
   it("skips pull when retry backoff has not elapsed", async () => {
