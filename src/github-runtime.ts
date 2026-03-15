@@ -25,6 +25,11 @@ export interface RetryConfig {
   maxSeconds: number;
 }
 
+export interface RetryOverride {
+  delaySeconds?: number;
+  retryAt?: Date;
+}
+
 const DEFAULT_RETRY_CONFIG: RetryConfig = {
   initialSeconds: 5,
   maxSeconds: 300,
@@ -80,11 +85,16 @@ export function recordFailure(
   state: BindingRuntimeState,
   error: string,
   config: RetryConfig = DEFAULT_RETRY_CONFIG,
-  now: Date = new Date()
+  now: Date = new Date(),
+  retryOverride?: RetryOverride
 ): BindingRuntimeState {
   const nextAttempt = state.retryAttempt + 1;
-  const delaySeconds = computeNextRetryDelay(nextAttempt, config);
-  const nextRetryAt = new Date(now.getTime() + delaySeconds * 1000);
+  const delaySeconds = retryOverride?.delaySeconds ?? computeNextRetryDelay(nextAttempt, config);
+  const overrideRetryAt = retryOverride?.retryAt;
+  const nextRetryAt =
+    overrideRetryAt != null
+      ? new Date(Math.max(overrideRetryAt.getTime(), now.getTime()))
+      : new Date(now.getTime() + delaySeconds * 1000);
 
   return {
     ...state,

@@ -94,6 +94,7 @@ export {
   type BindingRuntimeState,
   type BindingRuntimeStore,
   type RetryConfig,
+  type RetryOverride,
 } from "@/github-runtime";
 export {
   createLoopPreventionStore,
