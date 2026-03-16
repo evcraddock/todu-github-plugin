@@ -725,9 +725,9 @@ describe("local provider state persistence", () => {
 
     const listCommentsCalls: number[] = [];
     const originalListComments = issueClient.listComments.bind(issueClient);
-    issueClient.listComments = async (target, issueNumber) => {
+    issueClient.listComments = async (target, issueNumber, options) => {
       listCommentsCalls.push(issueNumber);
-      return originalListComments(target, issueNumber);
+      return originalListComments(target, issueNumber, options);
     };
 
     await expect(secondProvider.pull(createBinding(), createProject())).resolves.toEqual({
@@ -1024,12 +1024,12 @@ describe("comment sync", () => {
     expect(ghComments[0].body).not.toContain("Original content");
   });
 
-  it("deletes mirrored GitHub comment when todu note is removed", async () => {
+  it("does not delete GitHub comment when todu note is removed", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
     issueClient.seedIssues(repositoryTarget(), [
       createIssue({
         number: 1,
-        title: "Issue with deletable comment",
+        title: "Issue with retained comment",
         state: "open",
         labels: ["status:active", "priority:medium"],
       }),
@@ -1050,12 +1050,12 @@ describe("comment sync", () => {
       [
         createTaskWithDetail({
           id: "task-1",
-          title: "Issue with deletable comment",
+          title: "Issue with retained comment",
           status: "active",
           comments: [
             createNote({
               id: "note-1",
-              content: "To be deleted",
+              content: "Pushed to GitHub",
               author: "alice",
               createdAt: "2026-03-10T01:00:00.000Z",
             }),
@@ -1072,7 +1072,7 @@ describe("comment sync", () => {
       [
         createTaskWithDetail({
           id: "task-1",
-          title: "Issue with deletable comment",
+          title: "Issue with retained comment",
           status: "active",
           comments: [],
         }),
@@ -1080,16 +1080,18 @@ describe("comment sync", () => {
       createProject()
     );
 
-    expect(issueClient.snapshotComments(repositoryTarget(), 1)).toHaveLength(0);
-    expect(provider.getState().commentLinks).toHaveLength(0);
+    // Comment is retained on GitHub — deletion during sync is disabled
+    expect(issueClient.snapshotComments(repositoryTarget(), 1)).toHaveLength(1);
+    // Comment link is also retained
+    expect(provider.getState().commentLinks).toHaveLength(1);
   });
 
-  it("detects deleted GitHub comments during pull for issues changed in the current cycle", async () => {
+  it("preserves comment link when GitHub comment is deleted (deletion detection is disabled)", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
     issueClient.seedIssues(repositoryTarget(), [
       createIssue({
         number: 1,
-        title: "Issue with comment to delete on GitHub",
+        title: "Issue with deleted GitHub comment",
         state: "open",
         labels: ["status:active", "priority:medium"],
         updatedAt: "2026-03-10T00:00:00.000Z",
@@ -1099,7 +1101,7 @@ describe("comment sync", () => {
       createGitHubComment({
         id: 200,
         issueNumber: 1,
-        body: "Will be deleted",
+        body: "Will be deleted on GitHub",
         author: "octocat",
         createdAt: "2026-03-10T00:00:00.000Z",
       }),
@@ -1118,7 +1120,7 @@ describe("comment sync", () => {
     issueClient.seedIssues(repositoryTarget(), [
       createIssue({
         number: 1,
-        title: "Issue with comment to delete on GitHub",
+        title: "Issue with deleted GitHub comment",
         state: "open",
         labels: ["status:active", "priority:medium"],
         updatedAt: new Date(Date.now() + 60_000).toISOString(),
@@ -1126,8 +1128,10 @@ describe("comment sync", () => {
     ]);
 
     const secondPull = await provider.pull(createBinding(), createProject());
+    // No comment returned (deleted + filtered by since)
     expect(secondPull.comments).toHaveLength(0);
-    expect(provider.getState().commentLinks).toHaveLength(0);
+    // Link is preserved — we no longer detect or clean up deleted GitHub comments
+    expect(provider.getState().commentLinks).toHaveLength(1);
   });
 
   it("resolves comment edit conflicts with last-write-wins using timestamps", async () => {
@@ -2180,9 +2184,9 @@ describe("incremental sync", () => {
 
     const listCommentsCalls: number[] = [];
     const originalListComments = issueClient.listComments.bind(issueClient);
-    issueClient.listComments = async (target, issueNumber) => {
+    issueClient.listComments = async (target, issueNumber, options) => {
       listCommentsCalls.push(issueNumber);
-      return originalListComments(target, issueNumber);
+      return originalListComments(target, issueNumber, options);
     };
 
     await provider.initialize({ settings: { token: "secret-token" } });
@@ -2210,11 +2214,13 @@ describe("incremental sync", () => {
 
     const secondPull = await provider.pull(createBinding(), createProject());
 
+    // Only changed issue #2 triggers a listComments call
     expect(listCommentsCalls).toEqual([2]);
     expect(secondPull.tasks).toHaveLength(1);
     expect(secondPull.tasks[0].title).toBe("Changed issue");
-    expect(secondPull.comments).toHaveLength(1);
-    expect(secondPull.comments?.[0].externalTaskId).toBe("evcraddock/todu-github-plugin#2");
+    // The existing comment on issue #2 was created before lastSuccessAt, so since-filtering
+    // excludes it — only genuinely new/updated comments are returned
+    expect(secondPull.comments).toHaveLength(0);
   });
 
   it("subsequent pull skips comment fetches when no issues changed", async () => {
@@ -2260,6 +2266,67 @@ describe("incremental sync", () => {
     expect(secondPull.tasks).toHaveLength(0);
     expect(secondPull.comments).toHaveLength(0);
     expect(listCommentsCalls).toEqual([]);
+  });
+
+  it("passes lastSuccessAt as since to listComments on subsequent pull", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Issue with comments",
+        state: "open",
+        labels: ["status:active"],
+        updatedAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 1, [
+      createGitHubComment({
+        id: 100,
+        issueNumber: 1,
+        body: "Old comment",
+        author: "octocat",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      }),
+    ]);
+
+    const runtimeStore = createInMemoryBindingRuntimeStore();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+      runtimeStore,
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    // First pull: no since, fetches all comments
+    const firstPull = await provider.pull(createBinding(), createProject());
+    expect(firstPull.comments).toHaveLength(1);
+
+    const capturedOptions: Array<{ since?: string }> = [];
+    const originalListComments = issueClient.listComments.bind(issueClient);
+    issueClient.listComments = async (target, issueNumber, options) => {
+      capturedOptions.push(options ?? {});
+      return originalListComments(target, issueNumber, options);
+    };
+
+    // Issue changes so it appears in next pull
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Issue with comments",
+        state: "open",
+        labels: ["status:active"],
+        updatedAt: new Date(Date.now() + 120_000).toISOString(),
+      }),
+    ]);
+
+    await provider.pull(createBinding(), createProject());
+
+    const lastSuccessAt = runtimeStore.get(createBinding().id)?.lastSuccessAt;
+    expect(lastSuccessAt).toBeTruthy();
+    expect(capturedOptions).toHaveLength(1);
+    expect(capturedOptions[0].since).toBe(lastSuccessAt);
   });
 
   it("pulls all issues after a failed cycle resets since", async () => {

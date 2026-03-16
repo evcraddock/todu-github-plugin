@@ -284,6 +284,7 @@ export function createGitHubSyncProvider(
           itemLinkStore: linkStore,
           commentLinkStore,
           issueNumbers: lastPullResult.touchedIssueNumbers,
+          since: runtimeState.lastSuccessAt ?? undefined,
         });
 
         const updatedRuntimeState = recordSuccess(runtimeState, null);
@@ -416,8 +417,7 @@ export function createGitHubSyncProvider(
             `${lastPushResult.skippedLinkedTasks} skipped, ` +
             `${lastPushResult.issueReadCount} issue reads, ` +
             `${pushCommentsResult.createdComments.length} comment creates, ` +
-            `${pushCommentsResult.updatedComments.length} comment updates, ` +
-            `${pushCommentsResult.deletedCommentIds.length} comment deletes`,
+            `${pushCommentsResult.updatedComments.length} comment updates`,
         });
 
         const taskLinks = lastPushResult.createdLinks.map((link) => ({
