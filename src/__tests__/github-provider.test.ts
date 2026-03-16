@@ -12,7 +12,7 @@ import {
   type Project,
   type TaskPushPayload,
 } from "@todu/core";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { createGitHubApiError } from "@/github-http-client";
 
@@ -43,6 +43,14 @@ import {
   stripAttribution,
   type GitHubComment,
 } from "@/index";
+
+beforeEach(() => {
+  const storageDirectory = path.join(process.cwd(), ".todu-github-plugin");
+  fs.mkdirSync(storageDirectory, { recursive: true });
+  fs.rmSync(path.join(storageDirectory, "item-links.json"), { force: true });
+  fs.rmSync(path.join(storageDirectory, "comment-links.json"), { force: true });
+  fs.rmSync(path.join(storageDirectory, "runtime-state.json"), { force: true });
+});
 
 describe("parseGitHubRepositoryTargetRef", () => {
   it("parses owner/repo target refs", () => {
@@ -347,6 +355,119 @@ describe("createGitHubSyncProvider", () => {
     expect(linkedTask.externalId).toBe("evcraddock/todu-github-plugin#7");
   });
 
+  it("skips unchanged linked tasks without reading GitHub issues", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    const binding = createBinding();
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    linkStore.save(
+      createLinkFromTask(
+        binding,
+        createTaskId("task-7"),
+        "evcraddock",
+        "todu-github-plugin",
+        7,
+        "2026-03-10T02:00:00.000Z"
+      )
+    );
+
+    let getIssueCalls = 0;
+    issueClient.getIssue = async () => {
+      getIssueCalls += 1;
+      throw new Error("getIssue should not be called for unchanged linked tasks");
+    };
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await provider.push(
+      binding,
+      [
+        createTaskWithDetail({
+          id: "task-7",
+          title: "Unchanged title",
+          description: "Unchanged body",
+          status: "active",
+          updatedAt: "2026-03-10T01:00:00.000Z",
+        }),
+      ],
+      createProject()
+    );
+
+    expect(getIssueCalls).toBe(0);
+    expect(provider.getState().lastPushResult).toMatchObject({
+      issueReadCount: 0,
+      skippedLinkedTasks: 1,
+    });
+  });
+
+  it("updates linked issues without reading GitHub issues once mirror state is known", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 7,
+        title: "Old title",
+        body: "Old body",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+        updatedAt: "2026-03-10T01:00:00.000Z",
+      }),
+    ]);
+    const binding = createBinding();
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    linkStore.save(
+      createLinkFromTask(
+        binding,
+        createTaskId("task-7"),
+        "evcraddock",
+        "todu-github-plugin",
+        7,
+        "2026-03-10T01:00:00.000Z"
+      )
+    );
+
+    let getIssueCalls = 0;
+    const originalGetIssue = issueClient.getIssue.bind(issueClient);
+    issueClient.getIssue = async (target, issueNumber) => {
+      getIssueCalls += 1;
+      return originalGetIssue(target, issueNumber);
+    };
+
+    const provider = createGitHubSyncProvider({ issueClient, linkStore });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await provider.push(
+      binding,
+      [
+        createTaskWithDetail({
+          id: "task-7",
+          title: "New title",
+          description: "New body",
+          status: "done",
+          priority: "high",
+          labels: ["bug"],
+          updatedAt: "2026-03-10T02:00:00.000Z",
+        }),
+      ],
+      createProject()
+    );
+
+    expect(getIssueCalls).toBe(0);
+    expect(issueClient.snapshotIssues(repositoryTarget())).toMatchObject([
+      {
+        number: 7,
+        title: "New title",
+        body: "New body",
+        state: "closed",
+        labels: ["bug", "status:done", "priority:high"],
+      },
+    ]);
+    expect(provider.getState().lastPushResult).toMatchObject({
+      issueReadCount: 0,
+      skippedLinkedTasks: 0,
+      updatedIssues: [expect.objectContaining({ number: 7 })],
+    });
+  });
+
   it("does not push over a newer GitHub issue when task is older", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
     issueClient.seedIssues(repositoryTarget(), [
@@ -484,21 +605,13 @@ describe("createGitHubSyncProvider", () => {
     const secondProvider = createGitHubSyncProvider({ issueClient });
     await secondProvider.initialize({ settings: { token: "secret-token", storagePath } });
 
-    await expect(secondProvider.pull(createBinding(), createProject())).resolves.toEqual({
-      tasks: [
-        expect.objectContaining({
-          externalId: "evcraddock/todu-github-plugin#1",
-          title: "Persisted issue",
-        }),
-      ],
-      comments: [],
-    });
     expect(secondProvider.getState().itemLinks).toEqual([
       {
         bindingId: createIntegrationBindingId("binding-1"),
         taskId: createTaskId("github:evcraddock/todu-github-plugin#1"),
         issueNumber: 1,
         externalId: "evcraddock/todu-github-plugin#1",
+        lastMirroredAt: "2026-03-10T00:00:00.000Z",
       },
     ]);
   });
@@ -551,7 +664,108 @@ describe("createGitHubSyncProvider", () => {
       updatedIssues: [],
       createdLinks: [],
       taskUpdates: [],
+      hydratedLinkedTasks: 0,
+      issueReadCount: 0,
+      skippedLinkedTasks: 0,
     });
+  });
+});
+
+describe("local provider state persistence", () => {
+  it("persists item links, comment links, and runtime state across provider instances", async () => {
+    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "todu-github-plugin-"));
+    const storagePath = path.join(tempDirectory, "item-links.json");
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Persisted issue",
+        body: "Body",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 1, [
+      createGitHubComment({
+        id: 100,
+        issueNumber: 1,
+        body: "Persisted comment",
+        author: "octocat",
+      }),
+    ]);
+
+    const firstProvider = createGitHubSyncProvider({ issueClient });
+    await firstProvider.initialize({ settings: { token: "secret-token", storagePath } });
+    await firstProvider.pull(createBinding(), createProject());
+
+    expect(fs.existsSync(storagePath)).toBe(true);
+    expect(fs.existsSync(path.join(tempDirectory, "comment-links.json"))).toBe(true);
+    expect(fs.existsSync(path.join(tempDirectory, "runtime-state.json"))).toBe(true);
+
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Persisted issue",
+        body: "Body",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+      }),
+      createIssue({
+        number: 2,
+        title: "New issue after restart",
+        body: "Body",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+        updatedAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ]);
+
+    const secondProvider = createGitHubSyncProvider({ issueClient });
+    await secondProvider.initialize({ settings: { token: "secret-token", storagePath } });
+
+    const listCommentsCalls: number[] = [];
+    const originalListComments = issueClient.listComments.bind(issueClient);
+    issueClient.listComments = async (target, issueNumber) => {
+      listCommentsCalls.push(issueNumber);
+      return originalListComments(target, issueNumber);
+    };
+
+    await expect(secondProvider.pull(createBinding(), createProject())).resolves.toEqual({
+      tasks: [
+        expect.objectContaining({
+          externalId: "evcraddock/todu-github-plugin#2",
+          title: "New issue after restart",
+        }),
+      ],
+      comments: [],
+    });
+    expect(listCommentsCalls).toEqual([2]);
+    expect(secondProvider.getState().itemLinks).toEqual([
+      {
+        bindingId: createIntegrationBindingId("binding-1"),
+        taskId: createTaskId("github:evcraddock/todu-github-plugin#1"),
+        issueNumber: 1,
+        externalId: "evcraddock/todu-github-plugin#1",
+        lastMirroredAt: "2026-03-10T00:00:00.000Z",
+      },
+      {
+        bindingId: createIntegrationBindingId("binding-1"),
+        taskId: createTaskId("github:evcraddock/todu-github-plugin#2"),
+        issueNumber: 2,
+        externalId: "evcraddock/todu-github-plugin#2",
+        lastMirroredAt: expect.any(String),
+      },
+    ]);
+    expect(secondProvider.getState().commentLinks).toEqual([
+      {
+        bindingId: createIntegrationBindingId("binding-1"),
+        taskId: createTaskId("github:evcraddock/todu-github-plugin#1"),
+        noteId: createNoteId("external:100"),
+        issueNumber: 1,
+        githubCommentId: 100,
+        lastMirroredAt: "2026-03-10T00:00:00.000Z",
+      },
+    ]);
   });
 });
 
@@ -1705,6 +1919,13 @@ describe("multi-cycle steady-state sync", () => {
     expect(issues[0].title).toBe("Updated title");
     expect(issues[0].labels).toContain("status:inprogress");
     expect(issues[0].labels).toContain("priority:high");
+
+    issueClient.seedIssues(repositoryTarget(), [
+      {
+        ...issues[0],
+        updatedAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ]);
 
     const finalPull = await provider.pull(createBinding(), createProject());
     expect(finalPull.tasks[0].title).toBe("Updated title");

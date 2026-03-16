@@ -37,6 +37,9 @@ export interface GitHubBootstrapExportResult {
   updatedIssues: GitHubIssue[];
   createdLinks: GitHubItemLink[];
   taskUpdates: GitHubBootstrapTaskUpdate[];
+  hydratedLinkedTasks: number;
+  issueReadCount: number;
+  skippedLinkedTasks: number;
 }
 
 export async function bootstrapGitHubIssuesToTasks(input: {
@@ -67,10 +70,17 @@ export async function bootstrapGitHubIssuesToTasks(input: {
       continue;
     }
 
+    const lastMirroredAt = issue.updatedAt ?? issue.createdAt;
+
     if (!existingLink) {
       const createdLink = createLinkFromIssue(input.binding, issue, input.owner, input.repo);
       input.linkStore.save(createdLink);
       createdLinks.push(createdLink);
+    } else if (lastMirroredAt && existingLink.lastMirroredAt !== lastMirroredAt) {
+      input.linkStore.save({
+        ...existingLink,
+        lastMirroredAt,
+      });
     }
 
     tasks.push(mapGitHubIssueToExternalTask(issue));
@@ -96,53 +106,64 @@ export async function bootstrapTasksToGitHubIssues(input: {
   const updatedIssues: GitHubIssue[] = [];
   const createdLinks: GitHubItemLink[] = [];
   const taskUpdates: GitHubBootstrapTaskUpdate[] = [];
+  let hydratedLinkedTasks = 0;
+  let issueReadCount = 0;
+  let skippedLinkedTasks = 0;
 
   for (const task of input.tasks) {
     const existingLink = input.linkStore.getByTaskId(input.binding.id, task.id);
     if (existingLink) {
-      const existingIssue = await input.issueClient.getIssue(
-        {
-          owner: input.owner,
-          repo: input.repo,
-        },
-        existingLink.issueNumber
-      );
       task.externalId = existingLink.externalId;
-      task.sourceUrl = existingIssue?.sourceUrl ?? task.sourceUrl;
+      task.sourceUrl ??= createIssueSourceUrl(input.owner, input.repo, existingLink.issueNumber);
 
-      if (shouldPushTaskUpdate(task, existingIssue)) {
-        const updatedIssue = await input.issueClient.updateIssue(
+      if (!existingLink.lastMirroredAt) {
+        issueReadCount += 1;
+        const existingIssue = await input.issueClient.getIssue(
           {
             owner: input.owner,
             repo: input.repo,
           },
-          existingLink.issueNumber,
-          createGitHubIssueUpdateFromTask(task)
+          existingLink.issueNumber
         );
-        task.sourceUrl = updatedIssue.sourceUrl;
-        updatedIssues.push(updatedIssue);
+        hydratedLinkedTasks += 1;
+
+        if (existingIssue) {
+          const hydratedLink: GitHubItemLink = {
+            ...existingLink,
+            lastMirroredAt: existingIssue.updatedAt ?? existingIssue.createdAt,
+          };
+          input.linkStore.save(hydratedLink);
+
+          if (!shouldPushTaskUpdate(task, existingIssue)) {
+            skippedLinkedTasks += 1;
+            continue;
+          }
+        }
+      } else if (!shouldPushTaskUpdateFromMirroredAt(task, existingLink.lastMirroredAt)) {
+        skippedLinkedTasks += 1;
+        continue;
       }
+
+      const updatedIssue = await input.issueClient.updateIssue(
+        {
+          owner: input.owner,
+          repo: input.repo,
+        },
+        existingLink.issueNumber,
+        createGitHubIssueUpdateFromTask(task)
+      );
+      task.sourceUrl = updatedIssue.sourceUrl;
+      input.linkStore.save({
+        ...existingLink,
+        lastMirroredAt: updatedIssue.updatedAt ?? updatedIssue.createdAt,
+      });
+      updatedIssues.push(updatedIssue);
       continue;
     }
 
     const matchingExternalId = getMatchingExternalId(task, input.owner, input.repo);
     if (matchingExternalId) {
-      const createdLink = createLinkFromTask(
-        input.binding,
-        task.id,
-        input.owner,
-        input.repo,
-        matchingExternalId.issueNumber
-      );
-      task.externalId = createdLink.externalId;
-      task.sourceUrl ??= createIssueSourceUrl(
-        input.owner,
-        input.repo,
-        matchingExternalId.issueNumber
-      );
-      input.linkStore.save(createdLink);
-      createdLinks.push(createdLink);
-
+      issueReadCount += 1;
       const existingIssue = await input.issueClient.getIssue(
         {
           owner: input.owner,
@@ -150,6 +171,21 @@ export async function bootstrapTasksToGitHubIssues(input: {
         },
         matchingExternalId.issueNumber
       );
+      const createdLink = createLinkFromTask(
+        input.binding,
+        task.id,
+        input.owner,
+        input.repo,
+        matchingExternalId.issueNumber,
+        existingIssue?.updatedAt ?? existingIssue?.createdAt
+      );
+      task.externalId = createdLink.externalId;
+      task.sourceUrl ??=
+        existingIssue?.sourceUrl ??
+        createIssueSourceUrl(input.owner, input.repo, matchingExternalId.issueNumber);
+      input.linkStore.save(createdLink);
+      createdLinks.push(createdLink);
+
       if (shouldPushTaskUpdate(task, existingIssue)) {
         const updatedIssue = await input.issueClient.updateIssue(
           {
@@ -160,6 +196,10 @@ export async function bootstrapTasksToGitHubIssues(input: {
           createGitHubIssueUpdateFromTask(task)
         );
         task.sourceUrl = updatedIssue.sourceUrl;
+        input.linkStore.save({
+          ...createdLink,
+          lastMirroredAt: updatedIssue.updatedAt ?? updatedIssue.createdAt,
+        });
         updatedIssues.push(updatedIssue);
       }
       continue;
@@ -184,7 +224,8 @@ export async function bootstrapTasksToGitHubIssues(input: {
       task.id,
       input.owner,
       input.repo,
-      createdIssue.number
+      createdIssue.number,
+      createdIssue.updatedAt ?? createdIssue.createdAt
     );
     task.externalId = createdLink.externalId;
     task.sourceUrl = createdIssue.sourceUrl;
@@ -202,6 +243,9 @@ export async function bootstrapTasksToGitHubIssues(input: {
     updatedIssues,
     createdLinks,
     taskUpdates,
+    hydratedLinkedTasks,
+    issueReadCount,
+    skippedLinkedTasks,
   };
 }
 
@@ -210,18 +254,29 @@ function createIssueSourceUrl(owner: string, repo: string, issueNumber: number):
 }
 
 function shouldPushTaskUpdate(task: TaskPushPayload, issue: GitHubIssue | null): boolean {
-  if (!issue?.updatedAt) {
+  if (!issue) {
+    return true;
+  }
+
+  return shouldPushTaskUpdateFromMirroredAt(task, issue.updatedAt ?? issue.createdAt);
+}
+
+function shouldPushTaskUpdateFromMirroredAt(
+  task: TaskPushPayload,
+  lastMirroredAt: string | undefined
+): boolean {
+  if (!lastMirroredAt) {
     return true;
   }
 
   const taskUpdatedAt = Date.parse(task.updatedAt);
-  const issueUpdatedAt = Date.parse(issue.updatedAt);
+  const issueUpdatedAt = Date.parse(lastMirroredAt);
 
   if (Number.isNaN(taskUpdatedAt) || Number.isNaN(issueUpdatedAt)) {
     return true;
   }
 
-  return taskUpdatedAt >= issueUpdatedAt;
+  return taskUpdatedAt > issueUpdatedAt;
 }
 
 function getMatchingExternalId(
