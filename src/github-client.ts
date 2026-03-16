@@ -42,6 +42,10 @@ export interface ListIssuesOptions {
   since?: string;
 }
 
+export interface ListCommentsOptions {
+  since?: string;
+}
+
 export interface GitHubIssueClient {
   listIssues(target: GitHubRepositoryTarget, options?: ListIssuesOptions): Promise<GitHubIssue[]>;
   getIssue(target: GitHubRepositoryTarget, issueNumber: number): Promise<GitHubIssue | null>;
@@ -51,7 +55,11 @@ export interface GitHubIssueClient {
     issueNumber: number,
     input: UpdateGitHubIssueInput
   ): Promise<GitHubIssue>;
-  listComments(target: GitHubRepositoryTarget, issueNumber: number): Promise<GitHubComment[]>;
+  listComments(
+    target: GitHubRepositoryTarget,
+    issueNumber: number,
+    options?: ListCommentsOptions
+  ): Promise<GitHubComment[]>;
   createComment(
     target: GitHubRepositoryTarget,
     issueNumber: number,
@@ -243,8 +251,17 @@ export function createInMemoryGitHubIssueClient(): InMemoryGitHubIssueClient {
       setIssues(target, nextIssues);
       return cloneIssue(updatedIssue);
     },
-    async listComments(target, issueNumber): Promise<GitHubComment[]> {
-      return getComments(target, issueNumber).map(cloneComment);
+    async listComments(target, issueNumber, options?): Promise<GitHubComment[]> {
+      return getComments(target, issueNumber)
+        .filter((comment) => {
+          if (!options?.since) {
+            return true;
+          }
+
+          const commentTime = comment.updatedAt ?? comment.createdAt;
+          return commentTime >= options.since;
+        })
+        .map(cloneComment);
     },
     async createComment(target, issueNumber, body): Promise<GitHubComment> {
       const comments = getComments(target, issueNumber);

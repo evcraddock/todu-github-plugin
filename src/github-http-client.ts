@@ -282,8 +282,12 @@ export function createHttpGitHubIssueClient(token: string): GitHubIssueClient {
       return mapApiIssue(target, raw);
     },
 
-    async listComments(target, issueNumber): Promise<GitHubComment[]> {
-      const path = `/repos/${target.owner}/${target.repo}/issues/${issueNumber}/comments`;
+    async listComments(target, issueNumber, options?): Promise<GitHubComment[]> {
+      let path = `/repos/${target.owner}/${target.repo}/issues/${issueNumber}/comments`;
+      if (options?.since) {
+        path += `?since=${encodeURIComponent(options.since)}`;
+      }
+
       const rawComments = await listAllPages<GitHubApiComment>(path);
       return rawComments.map((raw) => mapApiComment(target, issueNumber, raw));
     },
