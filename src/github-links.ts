@@ -11,6 +11,7 @@ export interface GitHubItemLink {
   taskId: Task["id"];
   issueNumber: number;
   externalId: string;
+  lastMirroredAt?: string;
 }
 
 export interface GitHubItemLinkStore {
@@ -140,6 +141,7 @@ export function createLinkFromIssue(
     taskId: createImportedTaskId(externalId),
     issueNumber: issue.number,
     externalId,
+    lastMirroredAt: issue.updatedAt ?? issue.createdAt,
   };
 }
 
@@ -148,12 +150,14 @@ export function createLinkFromTask(
   taskId: Task["id"],
   owner: string,
   repo: string,
-  issueNumber: number
+  issueNumber: number,
+  lastMirroredAt?: string
 ): GitHubItemLink {
   return {
     bindingId: binding.id,
     taskId,
     issueNumber,
     externalId: formatIssueExternalId({ owner, repo, issueNumber }),
+    ...(lastMirroredAt ? { lastMirroredAt } : {}),
   };
 }

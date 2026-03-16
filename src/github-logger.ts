@@ -31,15 +31,27 @@ export interface GitHubSyncLogger {
 
 export function createGitHubSyncLogger(): GitHubSyncLogger {
   const entries: SyncLogEntry[] = [];
+  const writeToConsole = process.env.NODE_ENV !== "test";
 
   const log = (level: LogLevel, message: string, context: SyncLogContext, error?: string): void => {
-    entries.push({
+    const entry: SyncLogEntry = {
       level,
       message,
       context: { ...context },
       error,
       timestamp: new Date().toISOString(),
-    });
+    };
+
+    entries.push(entry);
+
+    if (writeToConsole) {
+      const formattedEntry = formatLogEntry(entry);
+      if (level === "warn" || level === "error") {
+        console.error(formattedEntry);
+      } else {
+        console.log(formattedEntry);
+      }
+    }
   };
 
   return {

@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import {
   SYNC_PROVIDER_API_VERSION,
   type ExternalTask,
@@ -33,6 +35,7 @@ import {
 import { createInMemoryGitHubIssueClient, type GitHubIssueClient } from "@/github-client";
 import { createHttpGitHubIssueClient, isGitHubRateLimitError } from "@/github-http-client";
 import {
+  createFileGitHubCommentLinkStore,
   createInMemoryGitHubCommentLinkStore,
   type GitHubCommentLink,
   type GitHubCommentLinkStore,
@@ -57,6 +60,7 @@ import {
   type LoopPreventionStore,
 } from "@/github-loop-prevention";
 import {
+  createFileBindingRuntimeStore,
   createInMemoryBindingRuntimeStore,
   createInitialRuntimeState,
   recordFailure,
@@ -74,6 +78,8 @@ const TASK_PRIORITIES = new Set(["low", "medium", "high"]);
 const DEFAULT_LOOP_PREVENTION_MAX_AGE_MS = 10 * 60 * 1000;
 const IMPORT_CLOSED_ON_BOOTSTRAP_OPTION = "importClosedOnBootstrap";
 const RATE_LIMIT_FALLBACK_DELAY_SECONDS = 15 * 60;
+const COMMENT_LINK_STORAGE_FILE = "comment-links.json";
+const RUNTIME_STORAGE_FILE = "runtime-state.json";
 
 export interface GitHubProviderState {
   initialized: boolean;
@@ -134,6 +140,10 @@ function getErrorSummary(error: unknown): string {
   return message;
 }
 
+function createSiblingStoragePath(storagePath: string, fileName: string): string {
+  return path.join(path.dirname(storagePath), fileName);
+}
+
 export function createGitHubSyncProvider(
   options: CreateGitHubSyncProviderOptions = {}
 ): GitHubSyncProvider {
@@ -142,8 +152,8 @@ export function createGitHubSyncProvider(
   let lastPushResult: GitHubBootstrapExportResult | null = null;
   let issueClient: GitHubIssueClient = options.issueClient ?? createInMemoryGitHubIssueClient();
   let linkStore = options.linkStore ?? createInMemoryGitHubItemLinkStore();
-  const commentLinkStore = options.commentLinkStore ?? createInMemoryGitHubCommentLinkStore();
-  const runtimeStore = options.runtimeStore ?? createInMemoryBindingRuntimeStore();
+  let commentLinkStore = options.commentLinkStore ?? createInMemoryGitHubCommentLinkStore();
+  let runtimeStore = options.runtimeStore ?? createInMemoryBindingRuntimeStore();
   const loopPreventionStore = options.loopPreventionStore ?? createLoopPreventionStore();
   const logger = options.logger ?? createGitHubSyncLogger();
   const retryConfig = options.retryConfig;
@@ -202,12 +212,29 @@ export function createGitHubSyncProvider(
     version: GITHUB_PROVIDER_VERSION,
     async initialize(config: SyncProviderConfig): Promise<void> {
       settings = loadGitHubProviderSettings(config);
+      const commentLinkStoragePath = createSiblingStoragePath(
+        settings.storagePath,
+        COMMENT_LINK_STORAGE_FILE
+      );
+      const runtimeStoragePath = createSiblingStoragePath(
+        settings.storagePath,
+        RUNTIME_STORAGE_FILE
+      );
+
       if (!options.issueClient) {
         issueClient = createHttpGitHubIssueClient(settings.token);
       }
 
       if (!options.linkStore) {
         linkStore = createFileGitHubItemLinkStore(settings.storagePath);
+      }
+
+      if (!options.commentLinkStore) {
+        commentLinkStore = createFileGitHubCommentLinkStore(commentLinkStoragePath);
+      }
+
+      if (!options.runtimeStore) {
+        runtimeStore = createFileBindingRuntimeStore(runtimeStoragePath);
       }
     },
     async shutdown(): Promise<void> {
@@ -304,6 +331,9 @@ export function createGitHubSyncProvider(
           updatedIssues: [],
           createdLinks: [],
           taskUpdates: [],
+          hydratedLinkedTasks: 0,
+          issueReadCount: 0,
+          skippedLinkedTasks: 0,
         };
         logger.debug("skipping push due to binding strategy", logContext);
         return { commentLinks: [], taskLinks: [] };
@@ -380,7 +410,14 @@ export function createGitHubSyncProvider(
 
         logger.info("push completed", {
           ...logContext,
-          itemId: `${lastPushResult.createdIssues.length} created, ${lastPushResult.updatedIssues.length} updated`,
+          itemId:
+            `${lastPushResult.createdIssues.length} created, ` +
+            `${lastPushResult.updatedIssues.length} updated, ` +
+            `${lastPushResult.skippedLinkedTasks} skipped, ` +
+            `${lastPushResult.issueReadCount} issue reads, ` +
+            `${pushCommentsResult.createdComments.length} comment creates, ` +
+            `${pushCommentsResult.updatedComments.length} comment updates, ` +
+            `${pushCommentsResult.deletedCommentIds.length} comment deletes`,
         });
 
         const taskLinks = lastPushResult.createdLinks.map((link) => ({
