@@ -276,7 +276,7 @@ function shouldPushTaskUpdateFromMirroredAt(
     return true;
   }
 
-  return taskUpdatedAt >= issueUpdatedAt;
+  return taskUpdatedAt > issueUpdatedAt;
 }
 
 function getMatchingExternalId(

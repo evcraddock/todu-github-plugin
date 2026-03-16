@@ -45,10 +45,11 @@ import {
 } from "@/index";
 
 beforeEach(() => {
-  fs.rmSync(path.join(process.cwd(), ".todu-github-plugin"), {
-    recursive: true,
-    force: true,
-  });
+  const storageDirectory = path.join(process.cwd(), ".todu-github-plugin");
+  fs.mkdirSync(storageDirectory, { recursive: true });
+  fs.rmSync(path.join(storageDirectory, "item-links.json"), { force: true });
+  fs.rmSync(path.join(storageDirectory, "comment-links.json"), { force: true });
+  fs.rmSync(path.join(storageDirectory, "runtime-state.json"), { force: true });
 });
 
 describe("parseGitHubRepositoryTargetRef", () => {
