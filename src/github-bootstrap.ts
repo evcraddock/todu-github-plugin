@@ -23,6 +23,7 @@ const TASK_BOOTSTRAP_EXPORT_STATUSES = new Set<TaskPushPayload["status"]>([
 export interface GitHubBootstrapImportResult {
   tasks: ExternalTask[];
   createdLinks: GitHubItemLink[];
+  touchedIssueNumbers: number[];
 }
 
 export interface GitHubBootstrapTaskUpdate {
@@ -54,6 +55,7 @@ export async function bootstrapGitHubIssuesToTasks(input: {
 
   const tasks: ExternalTask[] = [];
   const createdLinks: GitHubItemLink[] = [];
+  const touchedIssueNumbers: number[] = [];
 
   for (const issue of issues) {
     if (issue.isPullRequest) {
@@ -72,11 +74,13 @@ export async function bootstrapGitHubIssuesToTasks(input: {
     }
 
     tasks.push(mapGitHubIssueToExternalTask(issue));
+    touchedIssueNumbers.push(issue.number);
   }
 
   return {
     tasks,
     createdLinks,
+    touchedIssueNumbers,
   };
 }
 

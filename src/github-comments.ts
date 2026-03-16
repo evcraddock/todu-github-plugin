@@ -77,12 +77,16 @@ export async function pullComments(input: {
   issueClient: GitHubIssueClient;
   itemLinkStore: GitHubItemLinkStore;
   commentLinkStore: GitHubCommentLinkStore;
+  issueNumbers?: readonly number[];
 }): Promise<PullCommentsResult> {
   const comments: ExternalComment[] = [];
   const createdLinks: GitHubCommentLink[] = [];
   const deletedLinks: GitHubCommentLink[] = [];
 
-  const itemLinks = input.itemLinkStore.list(input.binding.id);
+  const issueNumbers = input.issueNumbers ? new Set(input.issueNumbers) : null;
+  const itemLinks = input.itemLinkStore
+    .list(input.binding.id)
+    .filter((itemLink) => issueNumbers?.has(itemLink.issueNumber) ?? true);
 
   for (const itemLink of itemLinks) {
     const githubComments = await input.issueClient.listComments(
