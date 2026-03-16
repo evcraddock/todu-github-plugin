@@ -1920,6 +1920,13 @@ describe("multi-cycle steady-state sync", () => {
     expect(issues[0].labels).toContain("status:inprogress");
     expect(issues[0].labels).toContain("priority:high");
 
+    issueClient.seedIssues(repositoryTarget(), [
+      {
+        ...issues[0],
+        updatedAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ]);
+
     const finalPull = await provider.pull(createBinding(), createProject());
     expect(finalPull.tasks[0].title).toBe("Updated title");
     expect(finalPull.tasks[0].status).toBe("inprogress");
