@@ -1,10 +1,10 @@
-import type { ExternalTask, IntegrationBinding, TaskPushPayload } from "@todu/core";
+import type { ExportedTaskInput, ImportedTaskInput, IntegrationBinding } from "@todu/core";
 
 import type { GitHubIssue, GitHubIssueClient } from "@/github-client";
 import {
   createGitHubIssueCreateFromTask,
   createGitHubIssueUpdateFromTask,
-  mapGitHubIssueToExternalTask,
+  mapGitHubIssueToImportedTask,
 } from "@/github-fields";
 import {
   createLinkFromIssue,
@@ -14,20 +14,20 @@ import {
 } from "@/github-links";
 import { parseIssueExternalId } from "@/github-ids";
 
-const TASK_BOOTSTRAP_EXPORT_STATUSES = new Set<TaskPushPayload["status"]>([
+const TASK_BOOTSTRAP_EXPORT_STATUSES = new Set<ExportedTaskInput["status"]>([
   "active",
   "inprogress",
   "waiting",
 ]);
 
 export interface GitHubBootstrapImportResult {
-  tasks: ExternalTask[];
+  tasks: ImportedTaskInput[];
   createdLinks: GitHubItemLink[];
   touchedIssueNumbers: number[];
 }
 
 export interface GitHubBootstrapTaskUpdate {
-  taskId: TaskPushPayload["id"];
+  taskId: ExportedTaskInput["localTaskId"];
   externalId: string;
   sourceUrl?: string;
 }
@@ -56,7 +56,7 @@ export async function bootstrapGitHubIssuesToTasks(input: {
     input.since ? { since: input.since } : undefined
   );
 
-  const tasks: ExternalTask[] = [];
+  const tasks: ImportedTaskInput[] = [];
   const createdLinks: GitHubItemLink[] = [];
   const touchedIssueNumbers: number[] = [];
 
@@ -83,7 +83,7 @@ export async function bootstrapGitHubIssuesToTasks(input: {
       });
     }
 
-    tasks.push(mapGitHubIssueToExternalTask(issue));
+    tasks.push(mapGitHubIssueToImportedTask(issue));
     touchedIssueNumbers.push(issue.number);
   }
 
@@ -98,7 +98,7 @@ export async function bootstrapTasksToGitHubIssues(input: {
   binding: IntegrationBinding;
   owner: string;
   repo: string;
-  tasks: TaskPushPayload[];
+  tasks: ExportedTaskInput[];
   issueClient: GitHubIssueClient;
   linkStore: GitHubItemLinkStore;
 }): Promise<GitHubBootstrapExportResult> {
@@ -111,7 +111,7 @@ export async function bootstrapTasksToGitHubIssues(input: {
   let skippedLinkedTasks = 0;
 
   for (const task of input.tasks) {
-    const existingLink = input.linkStore.getByTaskId(input.binding.id, task.id);
+    const existingLink = input.linkStore.getByTaskId(input.binding.id, task.localTaskId);
     if (existingLink) {
       task.externalId = existingLink.externalId;
       task.sourceUrl ??= createIssueSourceUrl(input.owner, input.repo, existingLink.issueNumber);
@@ -173,7 +173,7 @@ export async function bootstrapTasksToGitHubIssues(input: {
       );
       const createdLink = createLinkFromTask(
         input.binding,
-        task.id,
+        task.localTaskId,
         input.owner,
         input.repo,
         matchingExternalId.issueNumber,
@@ -221,7 +221,7 @@ export async function bootstrapTasksToGitHubIssues(input: {
 
     const createdLink = createLinkFromTask(
       input.binding,
-      task.id,
+      task.localTaskId,
       input.owner,
       input.repo,
       createdIssue.number,
@@ -232,7 +232,7 @@ export async function bootstrapTasksToGitHubIssues(input: {
     input.linkStore.save(createdLink);
     createdLinks.push(createdLink);
     taskUpdates.push({
-      taskId: task.id,
+      taskId: task.localTaskId,
       externalId: createdLink.externalId,
       sourceUrl: createdIssue.sourceUrl,
     });
@@ -253,7 +253,7 @@ function createIssueSourceUrl(owner: string, repo: string, issueNumber: number):
   return `https://github.com/${owner}/${repo}/issues/${issueNumber}`;
 }
 
-function shouldPushTaskUpdate(task: TaskPushPayload, issue: GitHubIssue | null): boolean {
+function shouldPushTaskUpdate(task: ExportedTaskInput, issue: GitHubIssue | null): boolean {
   if (!issue) {
     return true;
   }
@@ -262,7 +262,7 @@ function shouldPushTaskUpdate(task: TaskPushPayload, issue: GitHubIssue | null):
 }
 
 function shouldPushTaskUpdateFromMirroredAt(
-  task: TaskPushPayload,
+  task: ExportedTaskInput,
   lastMirroredAt: string | undefined
 ): boolean {
   if (!lastMirroredAt) {
@@ -280,7 +280,7 @@ function shouldPushTaskUpdateFromMirroredAt(
 }
 
 function getMatchingExternalId(
-  task: TaskPushPayload,
+  task: ExportedTaskInput,
   owner: string,
   repo: string
 ): { issueNumber: number } | null {

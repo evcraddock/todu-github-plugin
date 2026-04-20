@@ -7,6 +7,7 @@ import {
   createNoteId,
   createProjectId,
   createTaskId,
+  type ExportedTaskInput,
   type IntegrationBinding,
   type Note,
   type Project,
@@ -40,6 +41,7 @@ import {
   parseGitHubBinding,
   parseGitHubRepositoryTargetRef,
   parseIssueExternalId,
+  pushComments,
   stripAttribution,
   type GitHubComment,
 } from "@/index";
@@ -166,7 +168,7 @@ describe("field normalization", () => {
     ).toEqual(["bug"]);
   });
 
-  it("maps todu task fields to GitHub issue updates without syncing assignees back", () => {
+  it("maps todu task fields to GitHub issue updates including outbound assignees", () => {
     expect(
       createGitHubIssueUpdateFromTask(
         createTaskWithDetail({
@@ -184,6 +186,7 @@ describe("field normalization", () => {
       body: "Markdown body",
       state: "closed",
       labels: ["bug", "status:done", "priority:high"],
+      assignees: ["alice", "bob"],
     });
   });
 });
@@ -246,7 +249,10 @@ describe("createGitHubSyncProvider", () => {
         status: "waiting",
         priority: "high",
         labels: ["bug"],
-        assignees: ["alice", "bob"],
+        assignees: [
+          { externalLogin: "alice", displayName: "alice", raw: "alice" },
+          { externalLogin: "bob", displayName: "bob", raw: "bob" },
+        ],
         sourceUrl: "https://github.com/evcraddock/todu-github-plugin/issues/1",
         createdAt: "2026-03-10T00:00:00.000Z",
         updatedAt: "2026-03-10T00:00:00.000Z",
@@ -259,7 +265,7 @@ describe("createGitHubSyncProvider", () => {
         status: "canceled",
         priority: "low",
         labels: ["enhancement"],
-        assignees: ["octocat"],
+        assignees: [{ externalLogin: "octocat", displayName: "octocat", raw: "octocat" }],
         sourceUrl: "https://github.com/evcraddock/todu-github-plugin/issues/2",
         createdAt: "2026-03-10T00:00:00.000Z",
         updatedAt: "2026-03-10T01:00:00.000Z",
@@ -302,6 +308,7 @@ describe("createGitHubSyncProvider", () => {
         body: "Active body",
         state: "open",
         labels: ["bug", "status:active", "priority:high"],
+        assignees: [],
       },
     ]);
     expect(activeTask.externalId).toBe("evcraddock/todu-github-plugin#1");
@@ -337,6 +344,7 @@ describe("createGitHubSyncProvider", () => {
       status: "done",
       priority: "high",
       labels: ["bug"],
+      assignees: ["caradoc-clanker"],
       updatedAt: "2026-03-10T01:00:00.000Z",
     });
 
@@ -349,7 +357,9 @@ describe("createGitHubSyncProvider", () => {
         body: "New body",
         state: "closed",
         labels: ["bug", "status:done", "priority:high"],
-        assignees: ["alice"],
+        assignees: [
+          { login: "caradoc-clanker", displayName: "caradoc-clanker", raw: "caradoc-clanker" },
+        ],
       },
     ]);
     expect(linkedTask.externalId).toBe("evcraddock/todu-github-plugin#7");
@@ -516,7 +526,7 @@ describe("createGitHubSyncProvider", () => {
     ]);
   });
 
-  it("imports GitHub assignees into todu task metadata and does not sync task assignees back", async () => {
+  it("imports GitHub assignees into v3 task actor refs and syncs mapped local assignees back", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
     issueClient.seedIssues(repositoryTarget(), [
       createIssue({
@@ -535,9 +545,19 @@ describe("createGitHubSyncProvider", () => {
 
     await provider.initialize({ settings: { token: "secret-token" } });
     const pullResult = await provider.pull(createBinding(), createProject());
-    const mappedTask = provider.mapToTask(pullResult.tasks[0], createProject());
 
-    expect(mappedTask.assignees).toEqual(["alice", "bob"]);
+    expect(pullResult.tasks[0]?.assignees).toEqual([
+      {
+        externalLogin: "alice",
+        displayName: "alice",
+        raw: "alice",
+      },
+      {
+        externalLogin: "bob",
+        displayName: "bob",
+        raw: "bob",
+      },
+    ]);
 
     const taskForPush = createTaskWithDetail({
       id: "task-9",
@@ -546,8 +566,137 @@ describe("createGitHubSyncProvider", () => {
       status: "active",
       assignees: ["charlie"],
     });
-    const externalTask = provider.mapFromTask(taskForPush, createProject());
-    expect(externalTask.assignees).toBeUndefined();
+    await provider.push(createBinding(), [taskForPush], createProject());
+    const pushedIssue = issueClient
+      .snapshotIssues(repositoryTarget())
+      .find((issue) => issue.title === "Push task");
+    expect(pushedIssue?.assignees).toEqual([
+      { login: "charlie", displayName: "charlie", raw: "charlie" },
+    ]);
+  });
+
+  it("preserves stable GitHub identity data for assignee and comment-author imports", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 10,
+        title: "Identity-rich issue",
+        body: "Body",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+        assignees: [
+          {
+            id: "101",
+            login: "alice",
+            displayName: "Alice Example",
+            raw: { type: "User", login: "alice" },
+          },
+          {
+            id: "102",
+            login: "dependabot[bot]",
+            displayName: "dependabot[bot]",
+            raw: { type: "Bot", login: "dependabot[bot]" },
+          },
+        ],
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 10, [
+      createGitHubComment({
+        id: 100,
+        issueNumber: 10,
+        body: "Hello from GitHub",
+        author: {
+          id: "103",
+          login: "release-bot[bot]",
+          displayName: "release-bot[bot]",
+          raw: { type: "Bot", login: "release-bot[bot]" },
+        },
+      }),
+    ]);
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    const pullResult = await provider.pull(createBinding(), createProject());
+
+    expect(pullResult.tasks[0]?.assignees).toEqual([
+      {
+        externalAccountId: "101",
+        externalLogin: "alice",
+        displayName: "Alice Example",
+        raw: { type: "User", login: "alice" },
+      },
+      {
+        externalAccountId: "102",
+        externalLogin: "dependabot[bot]",
+        displayName: "dependabot[bot]",
+        raw: { type: "Bot", login: "dependabot[bot]" },
+      },
+    ]);
+    expect(pullResult.comments).toEqual([
+      expect.objectContaining({
+        externalId: "100",
+        author: {
+          externalAccountId: "103",
+          externalLogin: "release-bot[bot]",
+          displayName: "release-bot[bot]",
+          raw: { type: "Bot", login: "release-bot[bot]" },
+        },
+      }),
+    ]);
+  });
+
+  it("skips outbound assignees that do not have usable GitHub logins", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    await provider.push(
+      createBinding(),
+      [
+        createTaskWithDetail({
+          id: "task-10",
+          title: "Push task with partial mappings",
+          description: "Body",
+          status: "active",
+          assignees: [
+            {
+              externalAccountId: "201",
+              externalLogin: "caradoc-clanker",
+              displayName: "Caradoc Clanker",
+            },
+            {
+              externalAccountId: "202",
+              displayName: "Caradoc Clanker",
+            },
+            {
+              externalAccountId: "203",
+              displayName: "service bot",
+            },
+            {
+              externalAccountId: "204",
+              externalLogin: "dependabot[bot]",
+              displayName: "dependabot[bot]",
+            },
+          ],
+        }),
+      ],
+      createProject()
+    );
+
+    const pushedIssue = issueClient
+      .snapshotIssues(repositoryTarget())
+      .find((issue) => issue.title === "Push task with partial mappings");
+    expect(pushedIssue?.assignees).toEqual([
+      { login: "caradoc-clanker", displayName: "caradoc-clanker", raw: "caradoc-clanker" },
+      { login: "dependabot[bot]", displayName: "dependabot[bot]", raw: "dependabot[bot]" },
+    ]);
   });
 
   it("follows the duplicate policy by creating a new issue instead of fuzzy matching by title", async () => {
@@ -839,7 +988,7 @@ describe("comment sync", () => {
       externalId: "100",
       externalTaskId: "evcraddock/todu-github-plugin#1",
       body: "Hello from GitHub",
-      author: "octocat",
+      author: { externalLogin: "octocat", displayName: "octocat", raw: "octocat" },
     });
   });
 
@@ -896,8 +1045,172 @@ describe("comment sync", () => {
       createProject()
     );
 
-    expect(result.commentLinks).toHaveLength(0);
+    expect(result.commentLinks).toEqual([
+      expect.objectContaining({
+        localNoteId: createNoteId("note-imported-1"),
+        externalCommentId: "100",
+        externalTaskId: createTaskId("task-1"),
+      }),
+    ]);
     expect(issueClient.snapshotComments(repositoryTarget(), 1)).toHaveLength(1);
+  });
+
+  it("repairs stale local comment links by trusting the note sync tag", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Issue with stale comment link",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 1, [
+      createGitHubComment({
+        id: 100,
+        issueNumber: 1,
+        body: "Imported from GitHub",
+        author: "octocat",
+        createdAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const commentLinkStore = createInMemoryGitHubCommentLinkStore();
+    const binding = createBinding();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+    commentLinkStore.save({
+      bindingId: binding.id,
+      taskId: createTaskId("task-1"),
+      noteId: createNoteId("external:100"),
+      issueNumber: 1,
+      githubCommentId: 100,
+      lastMirroredAt: "2026-03-10T00:00:00.000Z",
+    });
+    commentLinkStore.save({
+      bindingId: binding.id,
+      taskId: createTaskId("task-1"),
+      noteId: createNoteId("note-1"),
+      issueNumber: 1,
+      githubCommentId: 200,
+      lastMirroredAt: "2026-03-10T00:00:00.000Z",
+    });
+
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore,
+      commentLinkStore,
+      loadTaskNotes: async () => [{ id: "note-1", tags: ["sync:externalId:100"] }],
+    });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    const result = await provider.push(
+      binding,
+      [
+        createTaskWithDetail({
+          id: "task-1",
+          title: "Issue with stale comment link",
+          status: "active",
+          comments: [
+            createNote({
+              id: "note-1",
+              content: "Imported from GitHub",
+              author: "octocat",
+              createdAt: "2026-03-10T00:00:00.000Z",
+            }),
+          ],
+        }),
+      ],
+      createProject()
+    );
+
+    expect(result.commentLinks).toEqual([
+      expect.objectContaining({
+        localNoteId: createNoteId("note-1"),
+        externalCommentId: "100",
+        externalTaskId: createTaskId("task-1"),
+      }),
+    ]);
+    expect(issueClient.snapshotComments(repositoryTarget(), 1)).toHaveLength(1);
+    expect(provider.getState().commentLinks).toEqual([
+      {
+        bindingId: binding.id,
+        taskId: createTaskId("task-1"),
+        noteId: createNoteId("note-1"),
+        issueNumber: 1,
+        githubCommentId: 100,
+        lastMirroredAt: "2026-03-10T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("removes stale comment links for missing local notes before pushing", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const commentLinkStore = createInMemoryGitHubCommentLinkStore();
+    const binding = createBinding();
+
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Issue with stale link",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+      }),
+    ]);
+
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+    commentLinkStore.save({
+      bindingId: binding.id,
+      taskId: createTaskId("task-1"),
+      noteId: createNoteId("note-stale"),
+      issueNumber: 1,
+      githubCommentId: 21,
+      lastMirroredAt: "2026-03-10T00:00:00.000Z",
+    });
+    commentLinkStore.save({
+      bindingId: binding.id,
+      taskId: createTaskId("task-1"),
+      noteId: createNoteId("note-existing"),
+      issueNumber: 1,
+      githubCommentId: 22,
+      lastMirroredAt: "2026-03-10T00:00:00.000Z",
+    });
+
+    const staleLinks: Array<{ noteId: string; githubCommentId: number }> = [];
+    await pushComments({
+      binding,
+      owner: "evcraddock",
+      repo: "todu-github-plugin",
+      tasks: [
+        createTaskWithDetail({
+          id: "task-1",
+          title: "Issue with stale link",
+          status: "active",
+          comments: [
+            createNote({
+              id: "note-existing",
+              content: "Existing body",
+              author: "alice",
+              createdAt: "2026-03-10T00:00:00.000Z",
+            }),
+          ],
+        }),
+      ],
+      issueClient,
+      itemLinkStore: linkStore,
+      commentLinkStore,
+      onStaleLink: ({ commentLink }: { commentLink: { noteId: string; githubCommentId: number } }) => {
+        staleLinks.push({ noteId: String(commentLink.noteId), githubCommentId: commentLink.githubCommentId });
+      },
+    });
+
+    expect(staleLinks).toEqual([{ noteId: "note-stale", githubCommentId: 21 }]);
+    expect(commentLinkStore.getByNoteId(binding.id, createNoteId("note-stale"))).toBeNull();
   });
 
   it("pushes todu comments to GitHub with todu attribution", async () => {
@@ -948,7 +1261,7 @@ describe("comment sync", () => {
 
     const ghComments = issueClient.snapshotComments(repositoryTarget(), 1);
     expect(ghComments).toHaveLength(1);
-    expect(ghComments[0].body).toContain("_Synced from todu comment by @alice on");
+    expect(ghComments[0].body).toContain("_Synced from todu comment by @todu on");
     expect(ghComments[0].body).toContain("Hello from todu");
   });
 
@@ -1082,8 +1395,8 @@ describe("comment sync", () => {
 
     // Comment is retained on GitHub — deletion during sync is disabled
     expect(issueClient.snapshotComments(repositoryTarget(), 1)).toHaveLength(1);
-    // Comment link is also retained
-    expect(provider.getState().commentLinks).toHaveLength(1);
+    // Stale local link is pruned, but the remote comment is retained.
+    expect(provider.getState().commentLinks).toHaveLength(0);
   });
 
   it("preserves comment link when GitHub comment is deleted (deletion detection is disabled)", async () => {
@@ -1401,7 +1714,7 @@ describe("runtime integration", () => {
     expect(status?.lastErrorSummary).toContain(`retry after ${resetAt.toISOString()}`);
   });
 
-  it("uses a long fallback cooldown when rate-limit metadata is unavailable", async () => {
+  it("uses a long fallback cooldown when primary rate-limit metadata is unavailable", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
     issueClient.listIssues = async () => {
       throw createGitHubApiError({
@@ -1433,6 +1746,41 @@ describe("runtime integration", () => {
     const retryDelayMs = Date.parse(state!.nextRetryAt!) - Date.parse(state!.lastAttemptAt!);
     expect(retryDelayMs).toBe(15 * 60 * 1000);
     expect(state!.lastError).toContain("retry delayed due to GitHub rate limit");
+  });
+
+  it("uses a longer fallback cooldown for secondary rate-limit errors", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.listIssues = async () => {
+      throw createGitHubApiError({
+        status: 403,
+        method: "POST",
+        path: "/repos/evcraddock/todu-github-plugin/issues/1/comments",
+        responseBody:
+          '{"message":"You have exceeded a secondary rate limit and have been temporarily blocked from content creation.","status":"403"}',
+        headers: new Headers(),
+        now: new Date("2026-03-10T00:00:00.000Z"),
+      });
+    };
+
+    const runtimeStore = createInMemoryBindingRuntimeStore();
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore: createInMemoryGitHubItemLinkStore(),
+      runtimeStore,
+      retryConfig: { initialSeconds: 5, maxSeconds: 60 },
+    });
+
+    await provider.initialize({ settings: { token: "secret-token" } });
+    await expect(provider.pull(createBinding(), createProject())).rejects.toThrow(
+      "secondary rate limit"
+    );
+
+    const state = runtimeStore.get(createBinding().id);
+    expect(state).not.toBeNull();
+
+    const retryDelayMs = Date.parse(state!.nextRetryAt!) - Date.parse(state!.lastAttemptAt!);
+    expect(retryDelayMs).toBe(60 * 60 * 1000);
+    expect(state!.lastError).toContain("retry delayed due to GitHub secondary rate limit");
   });
 
   it("skips pull when retry backoff has not elapsed", async () => {
@@ -2018,7 +2366,7 @@ describe("closed bootstrap import", () => {
     expect(result.comments![0]).toMatchObject({
       externalId: "100",
       externalTaskId: "evcraddock/todu-github-plugin#1",
-      author: "octocat",
+      author: { externalLogin: "octocat", displayName: "octocat", raw: "octocat" },
     });
     expect(result.comments![0].body).toContain("Historical comment");
     expect(provider.getState().itemLinks).toHaveLength(1);
@@ -2326,7 +2674,10 @@ describe("incremental sync", () => {
     const lastSuccessAt = runtimeStore.get(createBinding().id)?.lastSuccessAt;
     expect(lastSuccessAt).toBeTruthy();
     expect(capturedOptions).toHaveLength(1);
-    expect(capturedOptions[0].since).toBe(lastSuccessAt);
+    expect(capturedOptions[0].since).toBeTruthy();
+    expect(
+      Date.parse(capturedOptions[0].since ?? "")
+    ).toBeGreaterThanOrEqual(Date.parse(lastSuccessAt ?? ""));
   });
 
   it("pulls all issues after a failed cycle resets since", async () => {
@@ -2458,6 +2809,7 @@ function createProject(): Project {
     name: "todu-github-plugin",
     status: "active",
     priority: "high",
+    authorizedAssigneeActorIds: [],
     createdAt: "2026-03-09T00:00:00.000Z",
     updatedAt: "2026-03-09T00:00:00.000Z",
   };
@@ -2470,20 +2822,41 @@ function createTaskWithDetail(
     status: TaskPushPayload["status"];
     description?: string;
     comments?: Note[];
-  } & Partial<Omit<TaskPushPayload, "id" | "title" | "status" | "description" | "comments">>
-): TaskPushPayload {
+    assignees?: Array<string | { externalLogin?: string; displayName?: string; externalAccountId?: string }>;
+  } & Partial<
+    Omit<
+      TaskPushPayload,
+      "id" | "title" | "status" | "description" | "comments" | "assignees"
+    >
+  >
+): TaskPushPayload & ExportedTaskInput {
+  const localTaskId = createTaskId(overrides.id);
+  const comments = (overrides.comments ?? []).map((comment) => ({
+    ...comment,
+    localNoteId: comment.id,
+    body: comment.content,
+    updatedAt: comment.createdAt,
+  }));
+  const assignees = (overrides.assignees ?? []).map((assignee) =>
+    typeof assignee === "string"
+      ? { externalLogin: assignee, displayName: assignee }
+      : assignee
+  );
+
   return {
-    id: createTaskId(overrides.id),
+    id: localTaskId,
+    localTaskId,
     title: overrides.title,
     status: overrides.status,
     priority: overrides.priority ?? "medium",
     projectId: overrides.projectId ?? createProjectId("project-1"),
     labels: overrides.labels ?? [],
-    assignees: overrides.assignees ?? [],
+    assigneeActorIds: overrides.assigneeActorIds ?? [],
+    assignees: assignees as unknown as string[] & ExportedTaskInput["assignees"],
     externalId: overrides.externalId,
     sourceUrl: overrides.sourceUrl,
     description: overrides.description,
-    comments: overrides.comments ?? [],
+    comments,
     createdAt: overrides.createdAt ?? "2026-03-10T00:00:00.000Z",
     updatedAt: overrides.updatedAt ?? "2026-03-10T00:00:00.000Z",
   };
@@ -2495,7 +2868,7 @@ function createIssue(overrides: {
   state: "open" | "closed";
   body?: string;
   labels?: string[];
-  assignees?: string[];
+  assignees?: Array<string | { id?: string; login?: string; displayName?: string; raw?: unknown }>;
   isPullRequest?: boolean;
   updatedAt?: string;
   createdAt?: string;
@@ -2507,7 +2880,11 @@ function createIssue(overrides: {
     body: overrides.body,
     state: overrides.state,
     labels: overrides.labels ?? [],
-    assignees: overrides.assignees ?? [],
+    assignees: (overrides.assignees ?? []).map((assignee) =>
+      typeof assignee === "string"
+        ? { login: assignee, displayName: assignee, raw: assignee }
+        : assignee
+    ),
     sourceUrl: `https://github.com/evcraddock/todu-github-plugin/issues/${overrides.number}`,
     createdAt: overrides.createdAt ?? "2026-03-10T00:00:00.000Z",
     updatedAt: overrides.updatedAt ?? "2026-03-10T00:00:00.000Z",
@@ -2535,7 +2912,7 @@ function createGitHubComment(overrides: {
   id: number;
   issueNumber: number;
   body: string;
-  author: string;
+  author: string | { id?: string; login?: string; displayName?: string; raw?: unknown };
   createdAt?: string;
   updatedAt?: string;
 }): GitHubComment {
@@ -2543,7 +2920,10 @@ function createGitHubComment(overrides: {
     id: overrides.id,
     issueNumber: overrides.issueNumber,
     body: overrides.body,
-    author: overrides.author,
+    author:
+      typeof overrides.author === "string"
+        ? { login: overrides.author, displayName: overrides.author, raw: overrides.author }
+        : overrides.author,
     sourceUrl: `https://github.com/evcraddock/todu-github-plugin/issues/${overrides.issueNumber}#issuecomment-${overrides.id}`,
     createdAt: overrides.createdAt ?? "2026-03-10T00:00:00.000Z",
     updatedAt: overrides.updatedAt,

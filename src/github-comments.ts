@@ -1,24 +1,37 @@
 import type {
-  ExternalComment,
+  ExportedCommentInput,
+  ExportedTaskInput,
+  ImportedCommentInput,
   IntegrationBinding,
   Note,
   NoteId,
   SyncProviderPushCommentLink,
-  TaskPushPayload,
 } from "@todu/core";
 
 import type { GitHubComment, GitHubIssueClient } from "@/github-client";
 import type { GitHubCommentLink, GitHubCommentLinkStore } from "@/github-comment-links";
-import type { GitHubItemLink, GitHubItemLinkStore } from "@/github-links";
+import { mapGitHubUserToExternalActorRef } from "@/github-fields";
 import { formatIssueExternalId } from "@/github-ids";
+import type { GitHubItemLink, GitHubItemLinkStore } from "@/github-links";
 
 const GITHUB_ATTRIBUTION_PREFIX = "_Synced from GitHub comment by @";
 const TODU_ATTRIBUTION_PREFIX = "_Synced from todu comment by @";
 const ATTRIBUTION_SUFFIX_PATTERN = / on \d{4}-\d{2}-\d{2}T[\d:.]+Z_$/;
 const SYNC_EXTERNAL_ID_TAG_PREFIX = "sync:externalId:";
 
-export function formatGitHubAttribution(author: string, timestamp: string): string {
-  return `_Synced from GitHub comment by @${author} on ${timestamp}_`;
+function getDisplayAuthor(author: { login?: string; displayName?: string } | string): string {
+  if (typeof author === "string") {
+    return author;
+  }
+
+  return author.login ?? author.displayName ?? "unknown";
+}
+
+export function formatGitHubAttribution(
+  author: { login?: string; displayName?: string } | string,
+  timestamp: string
+): string {
+  return `_Synced from GitHub comment by @${getDisplayAuthor(author)} on ${timestamp}_`;
 }
 
 export function formatToduAttribution(author: string, timestamp: string): string {
@@ -55,12 +68,31 @@ export function hasGitHubAttribution(body: string): boolean {
   );
 }
 
+function getSyncExternalCommentIdFromTags(tags: unknown): number | null {
+  if (!Array.isArray(tags)) {
+    return null;
+  }
+
+  for (const tag of tags) {
+    if (typeof tag !== "string" || !tag.startsWith(SYNC_EXTERNAL_ID_TAG_PREFIX)) {
+      continue;
+    }
+
+    const externalId = Number.parseInt(tag.slice(SYNC_EXTERNAL_ID_TAG_PREFIX.length), 10);
+    if (Number.isInteger(externalId) && externalId > 0) {
+      return externalId;
+    }
+  }
+
+  return null;
+}
+
 function hasImportedGitHubSyncTag(note: Note): boolean {
-  return note.tags.some((tag) => tag.startsWith(SYNC_EXTERNAL_ID_TAG_PREFIX));
+  return getSyncExternalCommentIdFromTags(note.tags) !== null;
 }
 
 export interface PullCommentsResult {
-  comments: ExternalComment[];
+  comments: ImportedCommentInput[];
   createdLinks: GitHubCommentLink[];
 }
 
@@ -74,7 +106,7 @@ export async function pullComments(input: {
   issueNumbers?: readonly number[];
   since?: string;
 }): Promise<PullCommentsResult> {
-  const comments: ExternalComment[] = [];
+  const comments: ImportedCommentInput[] = [];
   const createdLinks: GitHubCommentLink[] = [];
 
   const issueNumbers = input.issueNumbers ? new Set(input.issueNumbers) : null;
@@ -102,7 +134,7 @@ export async function pullComments(input: {
         externalId: String(ghComment.id),
         externalTaskId,
         body,
-        author: ghComment.author,
+        author: mapGitHubUserToExternalActorRef(ghComment.author),
         createdAt: ghComment.createdAt,
         updatedAt: ghComment.updatedAt,
         raw: ghComment,
@@ -145,54 +177,136 @@ export interface PushCommentsResult {
   updatedComments: GitHubComment[];
 }
 
+function resolveCommentLinkForPush(input: {
+  binding: IntegrationBinding;
+  taskId: ExportedTaskInput["localTaskId"];
+  itemLink: GitHubItemLink;
+  comment: ExportedCommentInput;
+  commentLinkStore: GitHubCommentLinkStore;
+}): GitHubCommentLink | null {
+  const existingLink = input.commentLinkStore.getByNoteId(input.binding.id, input.comment.localNoteId);
+  const syncExternalCommentId = getSyncExternalCommentIdFromTags(
+    (input.comment as { tags?: unknown }).tags
+  );
+
+  if (syncExternalCommentId === null) {
+    return existingLink;
+  }
+
+  const canonicalLink = input.commentLinkStore.getByGitHubCommentId(
+    input.binding.id,
+    syncExternalCommentId
+  );
+  const reconciledLink: GitHubCommentLink = {
+    bindingId: input.binding.id,
+    taskId: input.taskId,
+    noteId: input.comment.localNoteId,
+    issueNumber: input.itemLink.issueNumber,
+    githubCommentId: syncExternalCommentId,
+    lastMirroredAt:
+      canonicalLink?.lastMirroredAt ??
+      existingLink?.lastMirroredAt ??
+      input.comment.updatedAt ??
+      input.comment.createdAt,
+  };
+
+  if (existingLink && existingLink.githubCommentId !== syncExternalCommentId) {
+    input.commentLinkStore.remove(input.binding.id, input.comment.localNoteId);
+  }
+
+  if (
+    canonicalLink?.noteId !== input.comment.localNoteId ||
+    canonicalLink?.taskId !== input.taskId ||
+    canonicalLink?.issueNumber !== input.itemLink.issueNumber ||
+    existingLink?.githubCommentId !== syncExternalCommentId
+  ) {
+    input.commentLinkStore.save(reconciledLink);
+  }
+
+  return canonicalLink?.noteId === input.comment.localNoteId ? canonicalLink : reconciledLink;
+}
+
 export async function pushComments(input: {
   binding: IntegrationBinding;
   owner: string;
   repo: string;
-  tasks: TaskPushPayload[];
+  tasks: ExportedTaskInput[];
   issueClient: GitHubIssueClient;
   itemLinkStore: GitHubItemLinkStore;
   commentLinkStore: GitHubCommentLinkStore;
+  loadTaskNotes?: (
+    taskId: ExportedTaskInput["localTaskId"]
+  ) => Promise<Array<{ id: string; tags: string[] }>>;
+  onStaleLink?: (context: { itemLink: GitHubItemLink; commentLink: GitHubCommentLink }) => void | Promise<void>;
 }): Promise<PushCommentsResult> {
   const commentLinks: SyncProviderPushCommentLink[] = [];
   const createdComments: GitHubComment[] = [];
   const updatedComments: GitHubComment[] = [];
 
   for (const task of input.tasks) {
-    const itemLink = input.itemLinkStore.getByTaskId(input.binding.id, task.id);
+    const itemLink = input.itemLinkStore.getByTaskId(input.binding.id, task.localTaskId);
     if (!itemLink) {
       continue;
     }
 
-    const localTaskId = task.id;
+    const externalTaskId = String(task.localTaskId);
+    const taskNotes = input.loadTaskNotes ? await input.loadTaskNotes(task.localTaskId) : [];
+    const noteTagsById = new Map(taskNotes.map((note) => [String(note.id), note.tags]));
+    const currentNoteIds = new Set(task.comments.map((comment) => String(comment.localNoteId)));
 
-    for (const note of task.comments) {
-      const existingLink = input.commentLinkStore.getByNoteId(input.binding.id, note.id);
+    for (const existingCommentLink of input.commentLinkStore.listByIssue(
+      input.binding.id,
+      itemLink.issueNumber
+    )) {
+      if (currentNoteIds.has(String(existingCommentLink.noteId))) {
+        continue;
+      }
 
-      if (!existingLink && (hasGitHubAttribution(note.content) || hasImportedGitHubSyncTag(note))) {
+      input.commentLinkStore.remove(input.binding.id, existingCommentLink.noteId);
+      await input.onStaleLink?.({ itemLink, commentLink: existingCommentLink });
+    }
+
+    for (const comment of task.comments) {
+      const commentWithTags = {
+        ...comment,
+        tags: noteTagsById.get(String(comment.localNoteId)) ?? (comment as { tags?: unknown }).tags,
+      };
+      const existingLink = resolveCommentLinkForPush({
+        binding: input.binding,
+        taskId: task.localTaskId,
+        itemLink,
+        comment: commentWithTags,
+        commentLinkStore: input.commentLinkStore,
+      });
+
+      const hasImportedSyncTag =
+        getSyncExternalCommentIdFromTags((commentWithTags as { tags?: unknown }).tags) !== null;
+
+      if (!existingLink && (hasGitHubAttribution(comment.body) || hasImportedSyncTag)) {
         continue;
       }
 
       if (existingLink) {
         const updated = await updateGitHubCommentIfNeeded(
           input,
-          note,
+          comment,
           existingLink,
-          itemLink,
           updatedComments
         );
         commentLinks.push(
-          createPushCommentLink(note.id, existingLink.githubCommentId, localTaskId, updated)
+          createPushCommentLink(comment.localNoteId, existingLink.githubCommentId, externalTaskId, updated)
         );
       } else {
-        const created = await createGitHubCommentFromNote(
+        const created = await createGitHubCommentFromExport(
           input,
-          note,
+          comment,
           task,
           itemLink,
           createdComments
         );
-        commentLinks.push(createPushCommentLink(note.id, created.id, localTaskId, created));
+        commentLinks.push(
+          createPushCommentLink(comment.localNoteId, created.id, externalTaskId, created)
+        );
       }
     }
   }
@@ -208,25 +322,24 @@ async function updateGitHubCommentIfNeeded(
     issueClient: GitHubIssueClient;
     commentLinkStore: GitHubCommentLinkStore;
   },
-  note: Note,
+  comment: ExportedCommentInput,
   existingLink: GitHubCommentLink,
-  _itemLink: GitHubItemLink,
   updatedComments: GitHubComment[]
 ): Promise<GitHubComment | null> {
-  const noteUpdatedAt = Date.parse(note.createdAt);
+  const commentUpdatedAt = Date.parse(comment.updatedAt ?? comment.createdAt);
   const lastMirroredAt = Date.parse(existingLink.lastMirroredAt);
 
   if (
-    !Number.isNaN(noteUpdatedAt) &&
+    !Number.isNaN(commentUpdatedAt) &&
     !Number.isNaN(lastMirroredAt) &&
-    noteUpdatedAt <= lastMirroredAt
+    commentUpdatedAt <= lastMirroredAt
   ) {
     return null;
   }
 
   const attributedBody = formatAttributedBody(
-    formatToduAttribution(note.author, note.createdAt),
-    note.content
+    formatToduAttribution("todu", comment.createdAt),
+    comment.body
   );
 
   const updated = await input.issueClient.updateComment(
@@ -239,13 +352,13 @@ async function updateGitHubCommentIfNeeded(
 
   input.commentLinkStore.save({
     ...existingLink,
-    lastMirroredAt: note.createdAt,
+    lastMirroredAt: comment.updatedAt ?? comment.createdAt,
   });
 
   return updated;
 }
 
-async function createGitHubCommentFromNote(
+async function createGitHubCommentFromExport(
   input: {
     binding: IntegrationBinding;
     owner: string;
@@ -253,14 +366,14 @@ async function createGitHubCommentFromNote(
     issueClient: GitHubIssueClient;
     commentLinkStore: GitHubCommentLinkStore;
   },
-  note: Note,
-  task: TaskPushPayload,
+  comment: ExportedCommentInput,
+  task: ExportedTaskInput,
   itemLink: GitHubItemLink,
   createdComments: GitHubComment[]
 ): Promise<GitHubComment> {
   const attributedBody = formatAttributedBody(
-    formatToduAttribution(note.author, note.createdAt),
-    note.content
+    formatToduAttribution("todu", comment.createdAt),
+    comment.body
   );
 
   const created = await input.issueClient.createComment(
@@ -273,11 +386,11 @@ async function createGitHubCommentFromNote(
 
   const newLink: GitHubCommentLink = {
     bindingId: input.binding.id,
-    taskId: task.id,
-    noteId: note.id,
+    taskId: task.localTaskId,
+    noteId: comment.localNoteId,
     issueNumber: itemLink.issueNumber,
     githubCommentId: created.id,
-    lastMirroredAt: note.createdAt,
+    lastMirroredAt: comment.updatedAt ?? comment.createdAt,
   };
 
   input.commentLinkStore.save(newLink);
@@ -299,4 +412,8 @@ function createPushCommentLink(
     createdAt: comment?.createdAt,
     updatedAt: comment?.updatedAt,
   };
+}
+
+export function shouldSkipImportedGitHubNote(note: Note): boolean {
+  return hasGitHubAttribution(note.content) || hasImportedGitHubSyncTag(note);
 }

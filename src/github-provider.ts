@@ -1,18 +1,18 @@
+import { execFile } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
 
-import {
-  SYNC_PROVIDER_API_VERSION,
-  type ExternalTask,
-  type IntegrationBinding,
-  type Project,
-  type SyncProvider,
-  type SyncProviderConfig,
-  type SyncProviderPullResult,
-  type SyncProviderPushResult,
-  type SyncProviderRegistration,
-  type Task,
-  type TaskPushPayload,
+import type {
+  ExportedTaskInput,
+  IntegrationBinding,
+  Project,
+  SyncProviderConfig,
+  SyncProviderPullResultV3,
+  SyncProviderPushResult,
+  SyncProviderRegistration,
+  SyncProviderV3,
 } from "@todu/core";
+import { SYNC_PROVIDER_API_VERSION } from "@todu/core";
 
 import {
   createBindingStatus,
@@ -33,16 +33,15 @@ import {
   type GitHubBootstrapImportResult,
 } from "@/github-bootstrap";
 import { createInMemoryGitHubIssueClient, type GitHubIssueClient } from "@/github-client";
-import { createHttpGitHubIssueClient, isGitHubRateLimitError } from "@/github-http-client";
+import { pullComments, pushComments } from "@/github-comments";
 import {
   createFileGitHubCommentLinkStore,
   createInMemoryGitHubCommentLinkStore,
   type GitHubCommentLink,
   type GitHubCommentLinkStore,
 } from "@/github-comment-links";
-import { pullComments, pushComments } from "@/github-comments";
 import { loadGitHubProviderSettings, type GitHubProviderSettings } from "@/github-config";
-import { createImportedTaskId } from "@/github-ids";
+import { createHttpGitHubIssueClient, isGitHubRateLimitError } from "@/github-http-client";
 import {
   createFileGitHubItemLinkStore,
   createInMemoryGitHubItemLinkStore,
@@ -72,12 +71,10 @@ import {
 
 export const GITHUB_PROVIDER_VERSION = "0.1.0";
 
-const DEFAULT_TIMESTAMP = new Date(0).toISOString();
-const OPEN_TASK_STATUSES = new Set(["active", "inprogress", "waiting"]);
-const TASK_PRIORITIES = new Set(["low", "medium", "high"]);
 const DEFAULT_LOOP_PREVENTION_MAX_AGE_MS = 10 * 60 * 1000;
 const IMPORT_CLOSED_ON_BOOTSTRAP_OPTION = "importClosedOnBootstrap";
 const RATE_LIMIT_FALLBACK_DELAY_SECONDS = 15 * 60;
+const SECONDARY_RATE_LIMIT_FALLBACK_DELAY_SECONDS = 60 * 60;
 const COMMENT_LINK_STORAGE_FILE = "comment-links.json";
 const RUNTIME_STORAGE_FILE = "runtime-state.json";
 
@@ -91,7 +88,7 @@ export interface GitHubProviderState {
   bindingStatuses: Map<IntegrationBinding["id"], BindingStatus>;
 }
 
-export interface GitHubSyncProvider extends SyncProvider {
+export interface GitHubSyncProvider extends SyncProviderV3 {
   getState(): GitHubProviderState;
 }
 
@@ -103,6 +100,9 @@ export interface CreateGitHubSyncProviderOptions {
   loopPreventionStore?: LoopPreventionStore;
   logger?: GitHubSyncLogger;
   retryConfig?: RetryConfig;
+  loadTaskNotes?: (
+    taskId: ExportedTaskInput["localTaskId"]
+  ) => Promise<Array<{ id: string; tags: string[] }>>;
 }
 
 function isImportClosedOnBootstrapEnabled(binding: IntegrationBinding): boolean {
@@ -123,6 +123,10 @@ function getRetryOverrideForError(
     }
   }
 
+  if (error.isSecondaryRateLimitError) {
+    return { delaySeconds: SECONDARY_RATE_LIMIT_FALLBACK_DELAY_SECONDS };
+  }
+
   return { delaySeconds: RATE_LIMIT_FALLBACK_DELAY_SECONDS };
 }
 
@@ -131,6 +135,10 @@ function getErrorSummary(error: unknown): string {
 
   if (isGitHubRateLimitError(error) && error.retryAt != null) {
     return `${message} (retry after ${error.retryAt})`;
+  }
+
+  if (isGitHubRateLimitError(error) && error.isSecondaryRateLimitError) {
+    return `${message} (retry delayed due to GitHub secondary rate limit)`;
   }
 
   if (isGitHubRateLimitError(error)) {
@@ -142,6 +150,19 @@ function getErrorSummary(error: unknown): string {
 
 function createSiblingStoragePath(storagePath: string, fileName: string): string {
   return path.join(path.dirname(storagePath), fileName);
+}
+
+const execFileAsync = promisify(execFile);
+
+async function loadTaskNotesFromCli(
+  taskId: ExportedTaskInput["localTaskId"]
+): Promise<Array<{ id: ExportedTaskInput["comments"][number]["localNoteId"]; tags: string[] }>> {
+  const { stdout } = await execFileAsync("todu", ["--format", "json", "note", "list", "--task", String(taskId)]);
+  const parsed = JSON.parse(stdout) as Array<{ id: string; tags?: unknown }>;
+  return parsed.map((note) => ({
+    id: note.id as ExportedTaskInput["comments"][number]["localNoteId"],
+    tags: Array.isArray(note.tags) ? note.tags.filter((tag): tag is string => typeof tag === "string") : [],
+  }));
 }
 
 export function createGitHubSyncProvider(
@@ -200,9 +221,7 @@ export function createGitHubSyncProvider(
     return settings;
   };
 
-  const validateBinding = (
-    binding: Parameters<SyncProvider["pull"]>[0]
-  ): GitHubRepositoryBinding => {
+  const validateBinding = (binding: IntegrationBinding): GitHubRepositoryBinding => {
     requireInitializedSettings();
     return parseGitHubBinding(binding);
   };
@@ -242,7 +261,7 @@ export function createGitHubSyncProvider(
       lastPullResult = null;
       lastPushResult = null;
     },
-    async pull(binding, _project): Promise<SyncProviderPullResult> {
+    async pull(binding, _project): Promise<SyncProviderPullResultV3> {
       const parsedBinding = validateBinding(binding);
       const logContext = createLogContext(binding, parsedBinding, "pull");
 
@@ -322,7 +341,7 @@ export function createGitHubSyncProvider(
         throw error;
       }
     },
-    async push(binding, tasks: TaskPushPayload[], _project): Promise<SyncProviderPushResult> {
+    async push(binding, tasks: ExportedTaskInput[], _project: Project): Promise<SyncProviderPushResult> {
       const parsedBinding = validateBinding(binding);
       const logContext = createLogContext(binding, parsedBinding, "push");
 
@@ -384,6 +403,7 @@ export function createGitHubSyncProvider(
           issueClient,
           itemLinkStore: linkStore,
           commentLinkStore,
+          loadTaskNotes: options.loadTaskNotes,
         });
 
         for (const createdComment of pushCommentsResult.createdComments) {
@@ -446,34 +466,6 @@ export function createGitHubSyncProvider(
         throw error;
       }
     },
-    mapToTask(external: ExternalTask, project: Project): Task {
-      return {
-        id: createImportedTaskId(external.externalId),
-        title: external.title,
-        status: normalizeTaskStatus(external.status),
-        priority: normalizeTaskPriority(external.priority),
-        projectId: project.id,
-        labels: [...(external.labels ?? [])],
-        assignees: [...(external.assignees ?? [])],
-        externalId: external.externalId,
-        sourceUrl: external.sourceUrl,
-        createdAt: external.createdAt ?? external.updatedAt ?? DEFAULT_TIMESTAMP,
-        updatedAt: external.updatedAt ?? external.createdAt ?? DEFAULT_TIMESTAMP,
-      };
-    },
-    mapFromTask(task: TaskPushPayload, _project: Project): ExternalTask {
-      return {
-        externalId: task.externalId ?? String(task.id),
-        title: task.title,
-        description: task.description,
-        status: task.status,
-        priority: task.priority,
-        labels: [...task.labels],
-        sourceUrl: task.sourceUrl,
-        createdAt: task.createdAt,
-        updatedAt: task.updatedAt,
-      };
-    },
     getState(): GitHubProviderState {
       return {
         initialized: settings !== null,
@@ -488,7 +480,7 @@ export function createGitHubSyncProvider(
   };
 }
 
-export const githubProvider = createGitHubSyncProvider();
+export const githubProvider = createGitHubSyncProvider({ loadTaskNotes: loadTaskNotesFromCli });
 
 export const syncProvider: SyncProviderRegistration = {
   manifest: {
@@ -498,23 +490,3 @@ export const syncProvider: SyncProviderRegistration = {
   },
   provider: githubProvider,
 };
-
-function normalizeTaskStatus(status: string | undefined): Task["status"] {
-  if (status && OPEN_TASK_STATUSES.has(status)) {
-    return status as Task["status"];
-  }
-
-  if (status === "done" || status === "canceled") {
-    return status;
-  }
-
-  return "active";
-}
-
-function normalizeTaskPriority(priority: string | undefined): Task["priority"] {
-  if (priority && TASK_PRIORITIES.has(priority)) {
-    return priority as Task["priority"];
-  }
-
-  return "medium";
-}
