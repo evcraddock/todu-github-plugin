@@ -35,6 +35,7 @@ export {
   type GitHubComment,
   type GitHubIssue,
   type GitHubIssueClient,
+  type GitHubUserRef,
   type InMemoryGitHubIssueClient,
 } from "@/github-client";
 export { createHttpGitHubIssueClient } from "@/github-http-client";
@@ -52,7 +53,8 @@ export {
   createGitHubPriorityFromTask,
   createGitHubStatusFromTask,
   getNormalGitHubLabels,
-  mapGitHubIssueToExternalTask,
+  mapGitHubIssueToImportedTask,
+  mapGitHubUserToExternalActorRef,
   mergeGitHubLabels,
   normalizeGitHubIssuePriority,
   normalizeGitHubIssueStatus,

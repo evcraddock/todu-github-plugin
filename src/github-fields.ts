@@ -1,6 +1,17 @@
-import type { ExternalTask, Task, TaskStatus, TaskWithDetail } from "@todu/core";
+import type {
+  ExportedTaskInput,
+  ExternalActorRef,
+  ImportedTaskInput,
+  Task,
+  TaskStatus,
+} from "@todu/core";
 
-import type { CreateGitHubIssueInput, GitHubIssue, UpdateGitHubIssueInput } from "@/github-client";
+import type {
+  CreateGitHubIssueInput,
+  GitHubIssue,
+  GitHubUserRef,
+  UpdateGitHubIssueInput,
+} from "@/github-client";
 
 const OPEN_STATUS_PRECEDENCE: TaskStatus[] = ["active", "inprogress", "waiting"];
 const CLOSED_STATUS_PRECEDENCE: TaskStatus[] = ["done", "canceled"];
@@ -26,10 +37,33 @@ export interface GitHubFieldMapping {
   status: TaskStatus;
   priority: Task["priority"];
   labels: string[];
-  assignees: string[];
+  assignees: ExternalActorRef[];
 }
 
-export function mapGitHubIssueToExternalTask(issue: GitHubIssue): ExternalTask {
+export function createGitHubAssigneesFromTask(task: ExportedTaskInput): string[] {
+  return task.assignees.flatMap((assignee) => {
+    if (assignee.externalLogin && assignee.externalLogin.trim().length > 0) {
+      return [assignee.externalLogin];
+    }
+
+    if (assignee.displayName && /^[A-Za-z0-9-]+$/.test(assignee.displayName)) {
+      return [assignee.displayName];
+    }
+
+    return [];
+  });
+}
+
+export function mapGitHubUserToExternalActorRef(user: GitHubUserRef): ExternalActorRef {
+  return {
+    ...(user.id !== undefined ? { externalAccountId: user.id } : {}),
+    ...(user.login !== undefined ? { externalLogin: user.login } : {}),
+    ...(user.displayName !== undefined ? { displayName: user.displayName } : {}),
+    ...(user.raw !== undefined ? { raw: user.raw } : {}),
+  };
+}
+
+export function mapGitHubIssueToImportedTask(issue: GitHubIssue): ImportedTaskInput {
   const normalizedStatus = normalizeGitHubIssueStatus(issue.state, issue.labels);
   const normalizedPriority = normalizeGitHubIssuePriority(issue.labels);
 
@@ -40,7 +74,7 @@ export function mapGitHubIssueToExternalTask(issue: GitHubIssue): ExternalTask {
     status: normalizedStatus.status,
     priority: normalizedPriority.priority,
     labels: getNormalGitHubLabels(issue.labels),
-    assignees: [...issue.assignees],
+    assignees: issue.assignees.map(mapGitHubUserToExternalActorRef),
     sourceUrl: issue.sourceUrl,
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
@@ -48,7 +82,7 @@ export function mapGitHubIssueToExternalTask(issue: GitHubIssue): ExternalTask {
   };
 }
 
-export function createGitHubIssueCreateFromTask(task: TaskWithDetail): CreateGitHubIssueInput {
+export function createGitHubIssueCreateFromTask(task: ExportedTaskInput): CreateGitHubIssueInput {
   const normalizedStatus = createGitHubStatusFromTask(task.status);
   const normalizedPriority = createGitHubPriorityFromTask(task.priority);
 
@@ -61,10 +95,11 @@ export function createGitHubIssueCreateFromTask(task: TaskWithDetail): CreateGit
       normalizedStatus.statusLabel,
       normalizedPriority.priorityLabel
     ),
+    assignees: createGitHubAssigneesFromTask(task),
   };
 }
 
-export function createGitHubIssueUpdateFromTask(task: TaskWithDetail): UpdateGitHubIssueInput {
+export function createGitHubIssueUpdateFromTask(task: ExportedTaskInput): UpdateGitHubIssueInput {
   return createGitHubIssueCreateFromTask(task);
 }
 

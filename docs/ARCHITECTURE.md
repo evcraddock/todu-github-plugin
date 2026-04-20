@@ -344,16 +344,18 @@ If a label to be pushed to GitHub does not exist in the repo, the plugin automat
 
 ## Assignee Mapping
 
-Assignee sync is asymmetric.
+Assignee sync is bidirectional.
 
 ### GitHub to todu
 
-- GitHub assignees sync into todu.
-- If multiple GitHub assignees exist, they are joined into plain text in the todu assignee field.
+- GitHub assignees sync into todu as structured external actor refs.
+- Stable GitHub account ids, login names, and display names are preserved where available.
 
 ### Todu to GitHub
 
-- Todu assignees do not sync to GitHub.
+- Mapped local assignees sync back to GitHub.
+- Outbound assignee writes are login-based because GitHub issue assignment uses logins.
+- Assignees without a usable GitHub login are skipped instead of failing the whole task push.
 
 ## Comments
 
@@ -640,7 +642,7 @@ A v1 implementation satisfies this spec when:
 3. bootstrap immediately imports open GitHub issues and exports active/inprogress/waiting todu tasks when strategy is `bidirectional`
 4. linked items receive `external_id = owner/repo#number`
 5. title/body/status/priority/labels sync according to the mapping rules and respect the binding strategy
-6. GitHub assignees sync into todu, but not the reverse
+6. GitHub assignees sync bidirectionally when a usable GitHub login is available for outbound assignment; account-id-only identities are skipped with graceful degradation
 7. comments sync bidirectionally for create/edit/delete with strict 1:1 mirrored behavior when the binding strategy includes both directions
 8. status and priority labels normalize deterministically
 9. deletion maps to cancelation instead of hard deletion

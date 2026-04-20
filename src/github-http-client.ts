@@ -4,9 +4,16 @@ import type {
   GitHubComment,
   GitHubIssue,
   GitHubIssueClient,
+  GitHubUserRef,
   ListIssuesOptions,
   UpdateGitHubIssueInput,
 } from "@/github-client";
+
+interface GitHubApiUser {
+  id?: number;
+  login?: string;
+  name?: string | null;
+}
 
 interface GitHubApiIssue {
   number: number;
@@ -14,7 +21,7 @@ interface GitHubApiIssue {
   body?: string | null;
   state: "open" | "closed";
   labels: Array<{ name: string } | string>;
-  assignees?: Array<{ login: string }>;
+  assignees?: GitHubApiUser[];
   html_url: string;
   created_at: string;
   updated_at: string;
@@ -24,7 +31,7 @@ interface GitHubApiIssue {
 interface GitHubApiComment {
   id: number;
   body: string;
-  user?: { login: string } | null;
+  user?: GitHubApiUser | null;
   html_url: string;
   created_at: string;
   updated_at: string;
@@ -36,6 +43,7 @@ export class GitHubApiError extends Error {
   readonly path: string;
   readonly responseBody: string;
   readonly isRateLimitError: boolean;
+  readonly isSecondaryRateLimitError: boolean;
   readonly retryAt: string | null;
 
   constructor(input: {
@@ -44,6 +52,7 @@ export class GitHubApiError extends Error {
     path: string;
     responseBody: string;
     isRateLimitError: boolean;
+    isSecondaryRateLimitError: boolean;
     retryAt: string | null;
   }) {
     super(`GitHub API ${input.method} ${input.path} failed: ${input.status} ${input.responseBody}`);
@@ -53,6 +62,7 @@ export class GitHubApiError extends Error {
     this.path = input.path;
     this.responseBody = input.responseBody;
     this.isRateLimitError = input.isRateLimitError;
+    this.isSecondaryRateLimitError = input.isSecondaryRateLimitError;
     this.retryAt = input.retryAt;
   }
 }
@@ -77,6 +87,15 @@ function parseRetryAtFromHeaders(headers: Headers, now: Date = new Date()): stri
   return null;
 }
 
+function isSecondaryRateLimitResponse(status: number, responseBody: string): boolean {
+  if (status !== 403) {
+    return false;
+  }
+
+  const normalizedBody = responseBody.toLowerCase();
+  return normalizedBody.includes("secondary rate limit");
+}
+
 function isRateLimitResponse(status: number, headers: Headers, responseBody: string): boolean {
   if (status === 429) {
     return true;
@@ -84,6 +103,10 @@ function isRateLimitResponse(status: number, headers: Headers, responseBody: str
 
   if (status !== 403) {
     return false;
+  }
+
+  if (isSecondaryRateLimitResponse(status, responseBody)) {
+    return true;
   }
 
   const remainingHeader = headers.get("x-ratelimit-remaining");
@@ -103,6 +126,7 @@ export function createGitHubApiError(input: {
   now?: Date;
 }): GitHubApiError {
   const now = input.now ?? new Date();
+  const secondaryRateLimitError = isSecondaryRateLimitResponse(input.status, input.responseBody);
   const rateLimitError = isRateLimitResponse(input.status, input.headers, input.responseBody);
 
   return new GitHubApiError({
@@ -111,6 +135,7 @@ export function createGitHubApiError(input: {
     path: input.path,
     responseBody: input.responseBody,
     isRateLimitError: rateLimitError,
+    isSecondaryRateLimitError: secondaryRateLimitError,
     retryAt: rateLimitError ? parseRetryAtFromHeaders(input.headers, now) : null,
   });
 }
@@ -123,8 +148,17 @@ function normalizeLabels(labels: GitHubApiIssue["labels"]): string[] {
   return labels.map((label) => (typeof label === "string" ? label : label.name));
 }
 
-function normalizeAssignees(assignees?: Array<{ login: string }>): string[] {
-  return (assignees ?? []).map((a) => a.login);
+function normalizeUserRef(user: GitHubApiUser | undefined | null, raw: unknown): GitHubUserRef {
+  return {
+    ...(user?.id !== undefined ? { id: String(user.id) } : {}),
+    ...(user?.login !== undefined ? { login: user.login } : {}),
+    ...((user?.name ?? undefined) !== undefined ? { displayName: user?.name ?? undefined } : {}),
+    raw,
+  };
+}
+
+function normalizeAssignees(assignees?: GitHubApiUser[]): GitHubUserRef[] {
+  return (assignees ?? []).map((assignee) => normalizeUserRef(assignee, assignee));
 }
 
 function mapApiIssue(target: GitHubRepositoryTarget, raw: GitHubApiIssue): GitHubIssue {
@@ -152,7 +186,7 @@ function mapApiComment(
     id: raw.id,
     issueNumber,
     body: raw.body,
-    author: raw.user?.login ?? "unknown",
+    author: normalizeUserRef(raw.user, raw.user ?? { login: "unknown" }),
     sourceUrl: raw.html_url,
     createdAt: raw.created_at,
     updatedAt: raw.updated_at,
@@ -257,6 +291,7 @@ export function createHttpGitHubIssueClient(token: string): GitHubIssueClient {
           title: input.title,
           body: input.body,
           labels: input.labels,
+          assignees: input.assignees,
         }
       );
 
@@ -276,6 +311,7 @@ export function createHttpGitHubIssueClient(token: string): GitHubIssueClient {
           ...(input.body != null ? { body: input.body } : {}),
           ...(input.state != null ? { state: input.state } : {}),
           ...(input.labels != null ? { labels: input.labels } : {}),
+          ...(input.assignees != null ? { assignees: input.assignees } : {}),
         }
       );
 

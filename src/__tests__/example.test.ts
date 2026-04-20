@@ -21,6 +21,6 @@ describe("syncProvider registration", () => {
     }
 
     expect(result.value.manifest.name).toBe("github");
-    expect(result.value.manifest.apiVersion).toBe(2);
+    expect(result.value.manifest.apiVersion).toBe(3);
   });
 });

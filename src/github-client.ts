@@ -1,5 +1,12 @@
 import type { GitHubRepositoryTarget } from "@/github-binding";
 
+export interface GitHubUserRef {
+  id?: string;
+  login?: string;
+  displayName?: string;
+  raw?: unknown;
+}
+
 export interface GitHubIssue {
   number: number;
   externalId: string;
@@ -7,7 +14,7 @@ export interface GitHubIssue {
   body?: string;
   state: "open" | "closed";
   labels: string[];
-  assignees: string[];
+  assignees: GitHubUserRef[];
   sourceUrl?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -18,7 +25,7 @@ export interface GitHubComment {
   id: number;
   issueNumber: number;
   body: string;
-  author: string;
+  author: GitHubUserRef;
   sourceUrl?: string;
   createdAt: string;
   updatedAt?: string;
@@ -29,6 +36,7 @@ export interface CreateGitHubIssueInput {
   body?: string;
   state?: GitHubIssue["state"];
   labels?: string[];
+  assignees?: string[];
 }
 
 export interface UpdateGitHubIssueInput {
@@ -36,6 +44,7 @@ export interface UpdateGitHubIssueInput {
   body?: string;
   state?: GitHubIssue["state"];
   labels?: string[];
+  assignees?: string[];
 }
 
 export interface ListIssuesOptions {
@@ -115,13 +124,21 @@ export function createInMemoryGitHubIssueClient(): InMemoryGitHubIssueClient {
     commentsByIssue.set(getCommentKey(target, issueNumber), comments);
   };
 
+  const cloneUserRef = (user: GitHubUserRef): GitHubUserRef => ({ ...user });
+
+  const normalizeSeedUserRef = (user: GitHubUserRef | string): GitHubUserRef =>
+    typeof user === "string" ? { login: user, displayName: user, raw: user } : cloneUserRef(user);
+
   const cloneIssue = (issue: GitHubIssue): GitHubIssue => ({
     ...issue,
     labels: [...issue.labels],
-    assignees: [...issue.assignees],
+    assignees: issue.assignees.map(cloneUserRef),
   });
 
-  const cloneComment = (comment: GitHubComment): GitHubComment => ({ ...comment });
+  const cloneComment = (comment: GitHubComment): GitHubComment => ({
+    ...comment,
+    author: cloneUserRef(comment.author),
+  });
 
   const createIssueSourceUrl = (target: GitHubRepositoryTarget, issueNumber: number): string =>
     `https://github.com/${target.owner}/${target.repo}/issues/${issueNumber}`;
@@ -160,7 +177,7 @@ export function createInMemoryGitHubIssueClient(): InMemoryGitHubIssueClient {
           cloneIssue({
             ...issue,
             externalId: issue.externalId ?? `${target.owner}/${target.repo}#${issue.number}`,
-            assignees: [...(issue.assignees ?? [])],
+            assignees: (issue.assignees ?? []).map(normalizeSeedUserRef),
           })
         )
       );
@@ -176,6 +193,7 @@ export function createInMemoryGitHubIssueClient(): InMemoryGitHubIssueClient {
           ...comment,
           id,
           issueNumber,
+          author: normalizeSeedUserRef(comment.author),
           sourceUrl: comment.sourceUrl ?? createCommentSourceUrl(target, issueNumber, id),
         });
       });
@@ -220,7 +238,7 @@ export function createInMemoryGitHubIssueClient(): InMemoryGitHubIssueClient {
         body: input.body,
         state: input.state ?? "open",
         labels: [...(input.labels ?? [])],
-        assignees: [],
+        assignees: (input.assignees ?? []).map((assignee) => normalizeSeedUserRef(assignee)),
         sourceUrl: createIssueSourceUrl(target, nextIssueNumber),
         createdAt: timestamp,
         updatedAt: timestamp,
@@ -243,6 +261,9 @@ export function createInMemoryGitHubIssueClient(): InMemoryGitHubIssueClient {
         body: input.body ?? existingIssue.body,
         state: input.state ?? existingIssue.state,
         labels: input.labels ? [...input.labels] : [...existingIssue.labels],
+        assignees: input.assignees
+          ? input.assignees.map((assignee) => normalizeSeedUserRef(assignee))
+          : [...existingIssue.assignees],
         updatedAt: new Date().toISOString(),
       };
 
@@ -271,7 +292,10 @@ export function createInMemoryGitHubIssueClient(): InMemoryGitHubIssueClient {
         id: commentId,
         issueNumber,
         body,
-        author: "github-token-user",
+        author: {
+          login: "github-token-user",
+          displayName: "github-token-user",
+        },
         sourceUrl: createCommentSourceUrl(target, issueNumber, commentId),
         createdAt: timestamp,
         updatedAt: timestamp,

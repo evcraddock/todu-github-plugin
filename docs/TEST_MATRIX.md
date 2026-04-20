@@ -37,12 +37,14 @@ Documented coverage for major sync behaviors. Each row maps to one or more autom
 
 ## Field Sync
 
-| Behavior                                                    | Type | Status |
-| ----------------------------------------------------------- | ---- | ------ |
-| Push updates linked issue title/body/status/priority/labels | U    | ✅     |
-| Push skips update when GitHub issue is newer                | U    | ✅     |
-| Pull imports GitHub assignees                               | U    | ✅     |
-| Push does not sync assignees back to GitHub                 | U    | ✅     |
+| Behavior                                                               | Type | Status |
+| ---------------------------------------------------------------------- | ---- | ------ |
+| Push updates linked issue title/body/status/priority/labels            | U    | ✅     |
+| Push skips update when GitHub issue is newer                           | U    | ✅     |
+| Pull imports GitHub assignees with stable external identity data       | U    | ✅     |
+| Pull imports GitHub comment authors with stable external identity data | U    | ✅     |
+| Push syncs mapped assignees back to GitHub                             | U    | ✅     |
+| Push skips outbound assignees without usable GitHub logins             | U    | ✅     |
 
 ## Status and Priority Normalization
 
