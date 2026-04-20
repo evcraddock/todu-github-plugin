@@ -1204,8 +1204,15 @@ describe("comment sync", () => {
       issueClient,
       itemLinkStore: linkStore,
       commentLinkStore,
-      onStaleLink: ({ commentLink }: { commentLink: { noteId: string; githubCommentId: number } }) => {
-        staleLinks.push({ noteId: String(commentLink.noteId), githubCommentId: commentLink.githubCommentId });
+      onStaleLink: ({
+        commentLink,
+      }: {
+        commentLink: { noteId: string; githubCommentId: number };
+      }) => {
+        staleLinks.push({
+          noteId: String(commentLink.noteId),
+          githubCommentId: commentLink.githubCommentId,
+        });
       },
     });
 
@@ -2675,9 +2682,9 @@ describe("incremental sync", () => {
     expect(lastSuccessAt).toBeTruthy();
     expect(capturedOptions).toHaveLength(1);
     expect(capturedOptions[0].since).toBeTruthy();
-    expect(
-      Date.parse(capturedOptions[0].since ?? "")
-    ).toBeGreaterThanOrEqual(Date.parse(lastSuccessAt ?? ""));
+    expect(Date.parse(capturedOptions[0].since ?? "")).toBeGreaterThanOrEqual(
+      Date.parse(lastSuccessAt ?? "")
+    );
   });
 
   it("pulls all issues after a failed cycle resets since", async () => {
@@ -2822,12 +2829,11 @@ function createTaskWithDetail(
     status: TaskPushPayload["status"];
     description?: string;
     comments?: Note[];
-    assignees?: Array<string | { externalLogin?: string; displayName?: string; externalAccountId?: string }>;
+    assignees?: Array<
+      string | { externalLogin?: string; displayName?: string; externalAccountId?: string }
+    >;
   } & Partial<
-    Omit<
-      TaskPushPayload,
-      "id" | "title" | "status" | "description" | "comments" | "assignees"
-    >
+    Omit<TaskPushPayload, "id" | "title" | "status" | "description" | "comments" | "assignees">
   >
 ): TaskPushPayload & ExportedTaskInput {
   const localTaskId = createTaskId(overrides.id);
@@ -2838,9 +2844,7 @@ function createTaskWithDetail(
     updatedAt: comment.createdAt,
   }));
   const assignees = (overrides.assignees ?? []).map((assignee) =>
-    typeof assignee === "string"
-      ? { externalLogin: assignee, displayName: assignee }
-      : assignee
+    typeof assignee === "string" ? { externalLogin: assignee, displayName: assignee } : assignee
   );
 
   return {

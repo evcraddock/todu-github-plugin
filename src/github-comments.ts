@@ -184,7 +184,10 @@ function resolveCommentLinkForPush(input: {
   comment: ExportedCommentInput;
   commentLinkStore: GitHubCommentLinkStore;
 }): GitHubCommentLink | null {
-  const existingLink = input.commentLinkStore.getByNoteId(input.binding.id, input.comment.localNoteId);
+  const existingLink = input.commentLinkStore.getByNoteId(
+    input.binding.id,
+    input.comment.localNoteId
+  );
   const syncExternalCommentId = getSyncExternalCommentIdFromTags(
     (input.comment as { tags?: unknown }).tags
   );
@@ -237,7 +240,10 @@ export async function pushComments(input: {
   loadTaskNotes?: (
     taskId: ExportedTaskInput["localTaskId"]
   ) => Promise<Array<{ id: string; tags: string[] }>>;
-  onStaleLink?: (context: { itemLink: GitHubItemLink; commentLink: GitHubCommentLink }) => void | Promise<void>;
+  onStaleLink?: (context: {
+    itemLink: GitHubItemLink;
+    commentLink: GitHubCommentLink;
+  }) => void | Promise<void>;
 }): Promise<PushCommentsResult> {
   const commentLinks: SyncProviderPushCommentLink[] = [];
   const createdComments: GitHubComment[] = [];
@@ -294,7 +300,12 @@ export async function pushComments(input: {
           updatedComments
         );
         commentLinks.push(
-          createPushCommentLink(comment.localNoteId, existingLink.githubCommentId, externalTaskId, updated)
+          createPushCommentLink(
+            comment.localNoteId,
+            existingLink.githubCommentId,
+            externalTaskId,
+            updated
+          )
         );
       } else {
         const created = await createGitHubCommentFromExport(

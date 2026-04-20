@@ -85,9 +85,7 @@ export function createInMemoryGitHubCommentLinkStore(): GitHubCommentLinkStore {
         links.delete(getGitHubKey(link.bindingId, existingByNote.githubCommentId));
       }
 
-      const existingByGitHubComment = links.get(
-        getGitHubKey(link.bindingId, link.githubCommentId)
-      );
+      const existingByGitHubComment = links.get(getGitHubKey(link.bindingId, link.githubCommentId));
       if (existingByGitHubComment) {
         links.delete(getNoteKey(link.bindingId, existingByGitHubComment.noteId));
       }

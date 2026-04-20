@@ -157,11 +157,20 @@ const execFileAsync = promisify(execFile);
 async function loadTaskNotesFromCli(
   taskId: ExportedTaskInput["localTaskId"]
 ): Promise<Array<{ id: ExportedTaskInput["comments"][number]["localNoteId"]; tags: string[] }>> {
-  const { stdout } = await execFileAsync("todu", ["--format", "json", "note", "list", "--task", String(taskId)]);
+  const { stdout } = await execFileAsync("todu", [
+    "--format",
+    "json",
+    "note",
+    "list",
+    "--task",
+    String(taskId),
+  ]);
   const parsed = JSON.parse(stdout) as Array<{ id: string; tags?: unknown }>;
   return parsed.map((note) => ({
     id: note.id as ExportedTaskInput["comments"][number]["localNoteId"],
-    tags: Array.isArray(note.tags) ? note.tags.filter((tag): tag is string => typeof tag === "string") : [],
+    tags: Array.isArray(note.tags)
+      ? note.tags.filter((tag): tag is string => typeof tag === "string")
+      : [],
   }));
 }
 
@@ -341,7 +350,11 @@ export function createGitHubSyncProvider(
         throw error;
       }
     },
-    async push(binding, tasks: ExportedTaskInput[], _project: Project): Promise<SyncProviderPushResult> {
+    async push(
+      binding,
+      tasks: ExportedTaskInput[],
+      _project: Project
+    ): Promise<SyncProviderPushResult> {
       const parsedBinding = validateBinding(binding);
       const logContext = createLogContext(binding, parsedBinding, "push");
 
