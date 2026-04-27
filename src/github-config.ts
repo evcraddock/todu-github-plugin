@@ -1,3 +1,6 @@
+import os from "node:os";
+import path from "node:path";
+
 import type { SyncProviderConfig } from "@todu/core";
 
 export type GitHubProviderConfigErrorCode = "INVALID_SETTINGS" | "MISSING_TOKEN";
@@ -5,6 +8,53 @@ export type GitHubProviderConfigErrorCode = "INVALID_SETTINGS" | "MISSING_TOKEN"
 export interface GitHubProviderSettings {
   token: string;
   storagePath: string;
+}
+
+export interface GitHubDefaultStoragePathOptions {
+  env?: NodeJS.ProcessEnv;
+  homeDirectory?: string;
+  platform?: NodeJS.Platform;
+}
+
+const APP_STATE_DIRECTORY = "todu";
+const GITHUB_PLUGIN_STATE_DIRECTORY = "github-plugin";
+const ITEM_LINK_STORAGE_FILE = "item-links.json";
+
+function getAbsoluteEnvironmentPath(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const value = env[key];
+  return typeof value === "string" && value.trim() && path.isAbsolute(value) ? value : undefined;
+}
+
+function getDefaultStateDirectory({
+  env = process.env,
+  homeDirectory = os.homedir(),
+  platform = os.platform(),
+}: GitHubDefaultStoragePathOptions = {}): string {
+  if (platform === "darwin") {
+    return path.join(homeDirectory, "Library", "Application Support", APP_STATE_DIRECTORY);
+  }
+
+  if (platform === "win32") {
+    const appDataDirectory =
+      getAbsoluteEnvironmentPath(env, "LOCALAPPDATA") ??
+      getAbsoluteEnvironmentPath(env, "APPDATA") ??
+      path.join(homeDirectory, "AppData", "Local");
+    return path.join(appDataDirectory, APP_STATE_DIRECTORY);
+  }
+
+  const xdgStateHome = getAbsoluteEnvironmentPath(env, "XDG_STATE_HOME");
+  return path.join(
+    xdgStateHome ?? path.join(homeDirectory, ".local", "state"),
+    APP_STATE_DIRECTORY
+  );
+}
+
+export function getDefaultGitHubStoragePath(options: GitHubDefaultStoragePathOptions = {}): string {
+  return path.join(
+    getDefaultStateDirectory(options),
+    GITHUB_PLUGIN_STATE_DIRECTORY,
+    ITEM_LINK_STORAGE_FILE
+  );
 }
 
 export class GitHubProviderConfigError extends Error {
@@ -57,6 +107,6 @@ export function loadGitHubProviderSettings(config: SyncProviderConfig): GitHubPr
   return {
     token: token.trim(),
     storagePath:
-      typeof storagePath === "string" ? storagePath.trim() : ".todu-github-plugin/item-links.json",
+      typeof storagePath === "string" ? storagePath.trim() : getDefaultGitHubStoragePath(),
   };
 }
