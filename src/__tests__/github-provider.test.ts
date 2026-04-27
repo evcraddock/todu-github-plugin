@@ -13,7 +13,7 @@ import {
   type Project,
   type TaskPushPayload,
 } from "@todu/core";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createGitHubApiError } from "@/github-http-client";
 
@@ -24,6 +24,7 @@ import {
   GitHubExternalIdError,
   GitHubProviderConfigError,
   createGitHubIssueUpdateFromTask,
+  getDefaultGitHubStoragePath,
   createGitHubSyncProvider,
   createInMemoryBindingRuntimeStore,
   createInMemoryGitHubCommentLinkStore,
@@ -46,12 +47,45 @@ import {
   type GitHubComment,
 } from "@/index";
 
+const ORIGINAL_CWD = process.cwd();
+const TEST_ENV_KEYS = ["APPDATA", "HOME", "LOCALAPPDATA", "XDG_STATE_HOME"] as const;
+const ORIGINAL_ENV: Record<(typeof TEST_ENV_KEYS)[number], string | undefined> = {
+  APPDATA: process.env.APPDATA,
+  HOME: process.env.HOME,
+  LOCALAPPDATA: process.env.LOCALAPPDATA,
+  XDG_STATE_HOME: process.env.XDG_STATE_HOME,
+};
+
+let testEnvironmentRoot: string | null = null;
+
+function restoreOriginalEnvironment(): void {
+  for (const key of TEST_ENV_KEYS) {
+    if (ORIGINAL_ENV[key] === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = ORIGINAL_ENV[key];
+    }
+  }
+}
+
 beforeEach(() => {
-  const storageDirectory = path.join(process.cwd(), ".todu-github-plugin");
-  fs.mkdirSync(storageDirectory, { recursive: true });
-  fs.rmSync(path.join(storageDirectory, "item-links.json"), { force: true });
-  fs.rmSync(path.join(storageDirectory, "comment-links.json"), { force: true });
-  fs.rmSync(path.join(storageDirectory, "runtime-state.json"), { force: true });
+  process.chdir(ORIGINAL_CWD);
+  restoreOriginalEnvironment();
+  testEnvironmentRoot = fs.mkdtempSync(path.join(os.tmpdir(), "todu-github-test-env-"));
+  process.env.APPDATA = path.join(testEnvironmentRoot, "app-data");
+  process.env.HOME = path.join(testEnvironmentRoot, "home");
+  process.env.LOCALAPPDATA = path.join(testEnvironmentRoot, "local-app-data");
+  process.env.XDG_STATE_HOME = path.join(testEnvironmentRoot, "xdg-state");
+  fs.rmSync(path.join(process.cwd(), ".todu-github-plugin"), { recursive: true, force: true });
+});
+
+afterEach(() => {
+  process.chdir(ORIGINAL_CWD);
+  restoreOriginalEnvironment();
+  if (testEnvironmentRoot) {
+    fs.rmSync(testEnvironmentRoot, { recursive: true, force: true });
+    testEnvironmentRoot = null;
+  }
 });
 
 describe("parseGitHubRepositoryTargetRef", () => {
@@ -128,10 +162,64 @@ describe("parseGitHubBinding", () => {
 });
 
 describe("loadGitHubProviderSettings", () => {
-  it("loads token and default storage path from provider settings", () => {
-    expect(loadGitHubProviderSettings({ settings: { token: "  secret-token  " } })).toEqual({
+  it("loads token and stable absolute default storage path from provider settings", () => {
+    const settings = loadGitHubProviderSettings({ settings: { token: "  secret-token  " } });
+
+    expect(settings).toEqual({
       token: "secret-token",
-      storagePath: ".todu-github-plugin/item-links.json",
+      storagePath: getDefaultGitHubStoragePath(),
+    });
+    expect(path.isAbsolute(settings.storagePath)).toBe(true);
+  });
+
+  it("uses the XDG state directory on Linux when configured", () => {
+    const stateDirectory = path.join(os.tmpdir(), "xdg-state");
+
+    expect(
+      getDefaultGitHubStoragePath({
+        env: { XDG_STATE_HOME: stateDirectory },
+        homeDirectory: "/home/alice",
+        platform: "linux",
+      })
+    ).toBe(path.join(stateDirectory, "todu", "github-plugin", "item-links.json"));
+  });
+
+  it("ignores relative XDG state paths so the default stays absolute", () => {
+    expect(
+      getDefaultGitHubStoragePath({
+        env: { XDG_STATE_HOME: "relative-state" },
+        homeDirectory: "/home/alice",
+        platform: "linux",
+      })
+    ).toBe(path.join("/home/alice", ".local", "state", "todu", "github-plugin", "item-links.json"));
+  });
+
+  it("uses the macOS application support directory on Darwin", () => {
+    expect(
+      getDefaultGitHubStoragePath({
+        homeDirectory: "/Users/alice",
+        platform: "darwin",
+      })
+    ).toBe(
+      path.join(
+        "/Users/alice",
+        "Library",
+        "Application Support",
+        "todu",
+        "github-plugin",
+        "item-links.json"
+      )
+    );
+  });
+
+  it("preserves explicit storage paths", () => {
+    expect(
+      loadGitHubProviderSettings({
+        settings: { token: "secret-token", storagePath: " ./custom/item-links.json " },
+      })
+    ).toEqual({
+      token: "secret-token",
+      storagePath: "./custom/item-links.json",
     });
   });
 
@@ -763,6 +851,62 @@ describe("createGitHubSyncProvider", () => {
         lastMirroredAt: "2026-03-10T00:00:00.000Z",
       },
     ]);
+  });
+
+  it("stores default runtime state outside the daemon current working directory", async () => {
+    const originalCwd = process.cwd();
+    const envKeys = ["APPDATA", "HOME", "LOCALAPPDATA", "XDG_STATE_HOME"] as const;
+    const originalEnv: Record<(typeof envKeys)[number], string | undefined> = {
+      APPDATA: process.env.APPDATA,
+      HOME: process.env.HOME,
+      LOCALAPPDATA: process.env.LOCALAPPDATA,
+      XDG_STATE_HOME: process.env.XDG_STATE_HOME,
+    };
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "todu-github-default-storage-"));
+    const daemonCwd = path.join(tempRoot, "repo");
+    const homeDirectory = path.join(tempRoot, "home");
+
+    fs.mkdirSync(daemonCwd, { recursive: true });
+    fs.mkdirSync(homeDirectory, { recursive: true });
+    process.chdir(daemonCwd);
+    process.env.APPDATA = path.join(tempRoot, "app-data");
+    process.env.HOME = homeDirectory;
+    process.env.LOCALAPPDATA = path.join(tempRoot, "local-app-data");
+    process.env.XDG_STATE_HOME = path.join(tempRoot, "xdg-state");
+
+    try {
+      const issueClient = createInMemoryGitHubIssueClient();
+      issueClient.seedIssues(repositoryTarget(), [
+        createIssue({
+          number: 1,
+          title: "Default storage issue",
+          body: "Body",
+          state: "open",
+          labels: ["status:active", "priority:medium"],
+        }),
+      ]);
+      const provider = createGitHubSyncProvider({ issueClient });
+
+      await provider.initialize({ settings: { token: "secret-token" } });
+      await provider.pull(createBinding(), createProject());
+
+      const defaultStoragePath = getDefaultGitHubStoragePath();
+      expect(path.isAbsolute(defaultStoragePath)).toBe(true);
+      expect(fs.existsSync(defaultStoragePath)).toBe(true);
+      expect(fs.existsSync(path.join(path.dirname(defaultStoragePath), "runtime-state.json"))).toBe(
+        true
+      );
+      expect(fs.existsSync(path.join(daemonCwd, ".todu-github-plugin"))).toBe(false);
+    } finally {
+      process.chdir(originalCwd);
+      for (const key of envKeys) {
+        if (originalEnv[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = originalEnv[key];
+        }
+      }
+    }
   });
 
   it("respects binding strategy for pull, push, and none", async () => {

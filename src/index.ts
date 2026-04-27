@@ -16,7 +16,9 @@ export {
 } from "@/github-binding";
 export {
   GitHubProviderConfigError,
+  getDefaultGitHubStoragePath,
   loadGitHubProviderSettings,
+  type GitHubDefaultStoragePathOptions,
   type GitHubProviderSettings,
 } from "@/github-config";
 export {
