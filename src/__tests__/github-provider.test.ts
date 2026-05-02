@@ -13,7 +13,7 @@ import {
   type Project,
   type TaskPushPayload,
 } from "@todu/core";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createGitHubApiError } from "@/github-http-client";
 
@@ -2344,43 +2344,51 @@ describe("label normalization edge cases", () => {
 
 describe("multi-cycle steady-state sync", () => {
   it("pull then push then pull again produces consistent state", async () => {
-    const issueClient = createInMemoryGitHubIssueClient();
-    issueClient.seedIssues(repositoryTarget(), [
-      createIssue({
-        number: 1,
-        title: "Steady state issue",
-        state: "open",
-        labels: ["status:active", "priority:medium", "bug"],
-        updatedAt: "2026-03-10T00:00:00.000Z",
-      }),
-    ]);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-03-10T00:00:00.000Z"));
 
-    const linkStore = createInMemoryGitHubItemLinkStore();
-    const provider = createGitHubSyncProvider({ issueClient, linkStore });
-    await provider.initialize({ settings: { token: "secret-token" } });
-
-    const firstPull = await provider.pull(createBinding(), createProject());
-    expect(firstPull.tasks).toHaveLength(1);
-    expect(firstPull.tasks[0].title).toBe("Steady state issue");
-
-    await provider.push(
-      createBinding(),
-      [
-        createTaskWithDetail({
-          id: "task-new",
-          title: "New from todu",
-          status: "active",
+      const issueClient = createInMemoryGitHubIssueClient();
+      issueClient.seedIssues(repositoryTarget(), [
+        createIssue({
+          number: 1,
+          title: "Steady state issue",
+          state: "open",
+          labels: ["status:active", "priority:medium", "bug"],
+          updatedAt: "2026-03-10T00:00:00.000Z",
         }),
-      ],
-      createProject()
-    );
+      ]);
 
-    expect(issueClient.snapshotIssues(repositoryTarget())).toHaveLength(2);
+      const linkStore = createInMemoryGitHubItemLinkStore();
+      const provider = createGitHubSyncProvider({ issueClient, linkStore });
+      await provider.initialize({ settings: { token: "secret-token" } });
 
-    const secondPull = await provider.pull(createBinding(), createProject());
-    // Incremental: only the newly created issue is returned (updated since last success)
-    expect(secondPull.tasks).toHaveLength(1);
-    expect(secondPull.tasks[0].title).toBe("New from todu");
+      const firstPull = await provider.pull(createBinding(), createProject());
+      expect(firstPull.tasks).toHaveLength(1);
+      expect(firstPull.tasks[0].title).toBe("Steady state issue");
+
+      vi.setSystemTime(new Date("2026-03-10T00:01:00.000Z"));
+      await provider.push(
+        createBinding(),
+        [
+          createTaskWithDetail({
+            id: "task-new",
+            title: "New from todu",
+            status: "active",
+          }),
+        ],
+        createProject()
+      );
+
+      expect(issueClient.snapshotIssues(repositoryTarget())).toHaveLength(2);
+
+      vi.setSystemTime(new Date("2026-03-10T00:02:00.000Z"));
+      const secondPull = await provider.pull(createBinding(), createProject());
+      expect(secondPull.tasks).toHaveLength(1);
+      expect(secondPull.tasks[0].title).toBe("New from todu");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("updates from both sides converge after multiple cycles", async () => {
@@ -2809,6 +2817,9 @@ describe("incremental sync", () => {
       return originalListComments(target, issueNumber, options);
     };
 
+    const previousLastSuccessAt = runtimeStore.get(createBinding().id)?.lastSuccessAt;
+    expect(previousLastSuccessAt).toBeTruthy();
+
     // Issue changes so it appears in next pull
     issueClient.seedIssues(repositoryTarget(), [
       createIssue({
@@ -2822,13 +2833,9 @@ describe("incremental sync", () => {
 
     await provider.pull(createBinding(), createProject());
 
-    const lastSuccessAt = runtimeStore.get(createBinding().id)?.lastSuccessAt;
-    expect(lastSuccessAt).toBeTruthy();
     expect(capturedOptions).toHaveLength(1);
     expect(capturedOptions[0].since).toBeTruthy();
-    expect(Date.parse(capturedOptions[0].since ?? "")).toBeGreaterThanOrEqual(
-      Date.parse(lastSuccessAt ?? "")
-    );
+    expect(capturedOptions[0].since).toBe(previousLastSuccessAt);
   });
 
   it("pulls all issues after a failed cycle resets since", async () => {

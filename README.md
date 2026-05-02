@@ -16,15 +16,15 @@ npm run build
 ### 2. Install the plugin
 
 ```bash
-toduai plugin install /absolute/path/to/todu-github-plugin/dist/index.js
+todu plugin install /absolute/path/to/todu-github-plugin/dist/index.js
 ```
 
-This registers the plugin with the toduai daemon. Use the actual path where you cloned the repo.
+This registers the plugin with the todu daemon. Use the actual path where you cloned the repo.
 
 ### 3. Configure your GitHub token
 
 ```bash
-toduai plugin config github --set '{"settings":{"token":"ghp_your_token_here"},"intervalSeconds":300}'
+todu plugin config github --set '{"settings":{"token":"ghp_your_token_here"},"intervalSeconds":300}'
 ```
 
 The token needs `repo` scope for private repositories or `public_repo` for public ones. `intervalSeconds` controls how often the plugin syncs (default: 300 seconds).
@@ -32,8 +32,8 @@ The token needs `repo` scope for private repositories or `public_repo` for publi
 ### 4. Create a project and binding
 
 ```bash
-toduai project create --name my-project
-toduai integration add \
+todu project create --name my-project
+todu integration add \
   --provider github \
   --project my-project \
   --target-kind repository \
@@ -46,7 +46,7 @@ Replace `owner/repo` with the GitHub repository to sync. Strategy options: `bidi
 ### 5. Verify
 
 ```bash
-toduai integration status
+todu integration status
 ```
 
 ## Development
@@ -55,7 +55,7 @@ toduai integration status
 
 - Node.js 20+
 - [overmind](https://github.com/DarthSim/overmind) (process manager)
-- toduai CLI installed
+- todu CLI installed
 
 ### Setup
 
@@ -64,7 +64,7 @@ npm install
 cp config/dev.toduai.yaml.template config/dev.toduai.yaml
 ```
 
-The dev config is gitignored because `toduai plugin config` writes secrets into it.
+The dev config is gitignored because `todu plugin config` writes secrets into it.
 
 ### Dev environment
 
@@ -85,7 +85,7 @@ The dev environment uses a project-local data directory (`.dev/todu/data/`) sepa
 ### Common commands
 
 ```bash
-make dev-cli CMD="plugin list"          # Run any toduai command against dev daemon
+make dev-cli CMD="plugin list"          # Run any todu command against dev daemon
 make dev-cli CMD="task list"            # List tasks
 make dev-logs                           # View daemon logs
 npm test                                # Run unit tests

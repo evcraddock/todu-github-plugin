@@ -6,7 +6,7 @@ Draft
 
 ## Summary
 
-`todu-github-plugin` is a `syncProvider` plugin for `toduai` that synchronizes one GitHub repository on `github.com` with one todu project.
+`todu-github-plugin` is a `syncProvider` plugin for `todu` that synchronizes one GitHub repository on `github.com` with one todu project.
 
 The plugin provides bidirectional sync for:
 
@@ -85,15 +85,15 @@ Key alignment decisions:
 This spec assumes binding management is provided by the generic integration surface in core todu, with commands such as:
 
 ```bash
-toduai integration list --provider github
-toduai integration add --provider github --project rott --target-kind repository --target evcraddock/rott --strategy bidirectional
-toduai integration update <binding-id> --target-kind repository --target evcraddock/rott
-toduai integration set-strategy <binding-id> --strategy pull
-toduai integration enable <binding-id>
-toduai integration disable <binding-id>
-toduai integration remove <binding-id>
-toduai integration status
-toduai integration status <binding-id>
+todu integration list --provider github
+todu integration add --provider github --project rott --target-kind repository --target evcraddock/rott --strategy bidirectional
+todu integration update <binding-id> --target-kind repository --target evcraddock/rott
+todu integration set-strategy <binding-id> --strategy pull
+todu integration enable <binding-id>
+todu integration disable <binding-id>
+todu integration remove <binding-id>
+todu integration status
+todu integration status <binding-id>
 ```
 
 Rules:
@@ -473,7 +473,7 @@ Observability is split between shared integration binding status and local provi
 
 ### Shared binding status
 
-The authority daemon should publish the high-level runtime status for each binding through the core integration status model surfaced by `toduai integration status`.
+The authority daemon should publish the high-level runtime status for each binding through the core integration status model surfaced by `todu integration status`.
 
 Minimum shared observable data per binding:
 
@@ -548,7 +548,7 @@ Suggested contents:
 
 ### Add
 
-`toduai integration add --provider github ...` must:
+`todu integration add --provider github ...` must:
 
 1. validate project exists
 2. validate `target-kind repository`
@@ -559,17 +559,17 @@ Suggested contents:
 
 ### Update
 
-`toduai integration update <binding-id> ...` updates the shared binding target metadata.
+`todu integration update <binding-id> ...` updates the shared binding target metadata.
 
 ### Strategy and enablement
 
-- `toduai integration set-strategy <binding-id> --strategy ...` changes the desired binding strategy.
-- `toduai integration enable <binding-id>` re-enables execution for a binding.
-- `toduai integration disable <binding-id>` disables execution while keeping the binding visible.
+- `todu integration set-strategy <binding-id> --strategy ...` changes the desired binding strategy.
+- `todu integration enable <binding-id>` re-enables execution for a binding.
+- `todu integration disable <binding-id>` disables execution while keeping the binding visible.
 
 ### Remove
 
-`toduai integration remove <binding-id>` removes the shared binding and stops future sync for it.
+`todu integration remove <binding-id>` removes the shared binding and stops future sync for it.
 
 Removing a binding does not delete already-synced tasks, issues, or comments.
 
@@ -630,7 +630,7 @@ These do not block the spec, but they should be made concrete during implementat
 - exact hidden marker format, if hidden markers are used
 - exact GitHub API client abstraction and pagination strategy
 - exact todu comment/task APIs used for delete detection and edit timestamps
-- whether `toduai integration remove` should preserve or remove plugin-local link metadata for historical audit/debugging
+- whether `todu integration remove` should preserve or remove plugin-local link metadata for historical audit/debugging
 - whether provider-local runtime state should key by `bindingId` alone or by `catalogId + bindingId` in the final implementation
 
 ## Acceptance Criteria for v1
