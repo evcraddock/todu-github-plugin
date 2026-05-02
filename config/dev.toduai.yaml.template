@@ -1,4 +1,4 @@
-# Project-local development config for the isolated toduai daemon and CLI.
+# Project-local development config for the isolated todu daemon and CLI.
 # Copy this to dev.toduai.yaml and fill in your token:
 #   cp config/dev.toduai.yaml.template config/dev.toduai.yaml
 #   make dev-cli CMD="plugin config github --set '{\"settings\":{\"token\":\"ghp_xxx\"},\"intervalSeconds\":30}'"

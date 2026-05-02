@@ -1,5 +1,5 @@
 DEV_CONFIG := ./config/dev.toduai.yaml
-DEV_CLI := toduai --config $(DEV_CONFIG)
+DEV_CLI := todu --config $(DEV_CONFIG)
 
 .PHONY: dev dev-stop dev-status dev-logs dev-tail dev-daemon-status dev-projects dev-integrations dev-cli check pre-pr help
 
@@ -47,7 +47,7 @@ dev-tail: ## Show last 100 lines of logs (non-blocking)
 		echo "Dev environment not running"; \
 	fi
 
-dev-daemon-status: ## Show isolated dev daemon status via toduai
+dev-daemon-status: ## Show isolated dev daemon status via todu
 	$(DEV_CLI) daemon status
 
 dev-projects: ## List projects against the isolated dev daemon
@@ -56,7 +56,7 @@ dev-projects: ## List projects against the isolated dev daemon
 dev-integrations: ## List integrations against the isolated dev daemon
 	$(DEV_CLI) integration list
 
-dev-cli: ## Run a toduai command against the isolated dev config (usage: make dev-cli CMD="daemon status")
+dev-cli: ## Run a todu command against the isolated dev config (usage: make dev-cli CMD="daemon status")
 	@test -n "$(CMD)" || (echo "Usage: make dev-cli CMD=\"daemon status\"" && exit 1)
 	$(DEV_CLI) $(CMD)
 
