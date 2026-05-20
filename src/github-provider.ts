@@ -305,6 +305,7 @@ export function createGitHubSyncProvider(
           linkStore,
           since: pullSince,
           importClosedOnBootstrap: pullSince == null && isImportClosedOnBootstrapEnabled(binding),
+          reconcileCheckedAt: pullStartedAt.toISOString(),
         });
 
         const pullCommentsResult = await pullComments({

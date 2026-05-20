@@ -20,6 +20,8 @@ const TASK_BOOTSTRAP_EXPORT_STATUSES = new Set<ExportedTaskInput["status"]>([
   "waiting",
 ]);
 
+const DEFAULT_LINKED_ISSUE_RECONCILE_INTERVAL_MS = 60 * 60 * 1000;
+
 export interface GitHubBootstrapImportResult {
   tasks: ImportedTaskInput[];
   createdLinks: GitHubItemLink[];
@@ -50,6 +52,8 @@ export async function bootstrapGitHubIssuesToTasks(input: {
   linkStore: GitHubItemLinkStore;
   since?: string;
   importClosedOnBootstrap?: boolean;
+  reconcileCheckedAt?: string;
+  reconcileIntervalMs?: number;
 }): Promise<GitHubBootstrapImportResult> {
   const issues = await input.issueClient.listIssues(
     { owner: input.owner, repo: input.repo },
@@ -60,11 +64,14 @@ export async function bootstrapGitHubIssuesToTasks(input: {
   const createdLinks: GitHubItemLink[] = [];
   const touchedIssueNumbers: number[] = [];
 
+  const listedIssueNumbers = new Set<number>();
+
   for (const issue of issues) {
     if (issue.isPullRequest) {
       continue;
     }
 
+    listedIssueNumbers.add(issue.number);
     const existingLink = input.linkStore.getByIssueNumber(input.binding.id, issue.number);
     if (!existingLink && issue.state !== "open" && !input.importClosedOnBootstrap) {
       continue;
@@ -87,11 +94,130 @@ export async function bootstrapGitHubIssuesToTasks(input: {
     touchedIssueNumbers.push(issue.number);
   }
 
+  if (input.since) {
+    await reconcileLinkedIssues({
+      binding: input.binding,
+      owner: input.owner,
+      repo: input.repo,
+      issueClient: input.issueClient,
+      linkStore: input.linkStore,
+      listedIssueNumbers,
+      since: input.since,
+      checkedAt: input.reconcileCheckedAt ?? new Date().toISOString(),
+      reconcileIntervalMs: input.reconcileIntervalMs ?? DEFAULT_LINKED_ISSUE_RECONCILE_INTERVAL_MS,
+      tasks,
+      touchedIssueNumbers,
+    });
+  }
+
   return {
     tasks,
     createdLinks,
     touchedIssueNumbers,
   };
+}
+
+async function reconcileLinkedIssues(input: {
+  binding: IntegrationBinding;
+  owner: string;
+  repo: string;
+  issueClient: GitHubIssueClient;
+  linkStore: GitHubItemLinkStore;
+  listedIssueNumbers: Set<number>;
+  since: string;
+  checkedAt: string;
+  reconcileIntervalMs: number;
+  tasks: ImportedTaskInput[];
+  touchedIssueNumbers: number[];
+}): Promise<void> {
+  for (const link of input.linkStore.list(input.binding.id)) {
+    if (input.listedIssueNumbers.has(link.issueNumber)) {
+      continue;
+    }
+
+    if (
+      !shouldReconcileLinkedIssue(link, input.since, input.checkedAt, input.reconcileIntervalMs)
+    ) {
+      continue;
+    }
+
+    const issue = await input.issueClient.getIssue(
+      { owner: input.owner, repo: input.repo },
+      link.issueNumber
+    );
+
+    if (!issue || issue.isPullRequest) {
+      input.linkStore.save({ ...link, lastReconciledAt: input.checkedAt });
+      continue;
+    }
+
+    const issueLastMirroredAt = issue.updatedAt ?? issue.createdAt;
+    const remoteIssueIsNewer =
+      issueLastMirroredAt != null && isRemoteIssueNewer(issueLastMirroredAt, link.lastMirroredAt);
+    const updatedLink: GitHubItemLink = {
+      ...link,
+      lastReconciledAt: input.checkedAt,
+      ...(issueLastMirroredAt && remoteIssueIsNewer ? { lastMirroredAt: issueLastMirroredAt } : {}),
+    };
+    input.linkStore.save(updatedLink);
+
+    // First reconciliation pass records that the issue was checked. Later passes
+    // periodically re-deliver linked issue state even when the remote timestamp did
+    // not change, so a host-side import failure cannot permanently strand local state.
+    if (!remoteIssueIsNewer && !link.lastReconciledAt) {
+      continue;
+    }
+
+    input.tasks.push(mapGitHubIssueToImportedTask(issue));
+    input.touchedIssueNumbers.push(issue.number);
+  }
+}
+
+function shouldReconcileLinkedIssue(
+  link: GitHubItemLink,
+  since: string,
+  checkedAt: string,
+  reconcileIntervalMs: number
+): boolean {
+  if (!link.lastMirroredAt) {
+    return true;
+  }
+
+  const sinceTime = Date.parse(since);
+  const lastMirroredTime = Date.parse(link.lastMirroredAt);
+  if (Number.isNaN(sinceTime) || Number.isNaN(lastMirroredTime)) {
+    return true;
+  }
+
+  if (lastMirroredTime >= sinceTime) {
+    return false;
+  }
+
+  if (!link.lastReconciledAt) {
+    return true;
+  }
+
+  const checkedTime = Date.parse(checkedAt);
+  const lastReconciledTime = Date.parse(link.lastReconciledAt);
+  if (Number.isNaN(checkedTime) || Number.isNaN(lastReconciledTime)) {
+    return true;
+  }
+
+  return checkedTime - lastReconciledTime >= reconcileIntervalMs;
+}
+
+function isRemoteIssueNewer(remoteUpdatedAt: string, lastMirroredAt: string | undefined): boolean {
+  if (!lastMirroredAt) {
+    return true;
+  }
+
+  const remoteTime = Date.parse(remoteUpdatedAt);
+  const lastMirroredTime = Date.parse(lastMirroredAt);
+  if (Number.isNaN(remoteTime) || Number.isNaN(lastMirroredTime)) {
+    return remoteUpdatedAt !== lastMirroredAt;
+  }
+
+  return remoteTime > lastMirroredTime;
 }
 
 export async function bootstrapTasksToGitHubIssues(input: {

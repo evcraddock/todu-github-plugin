@@ -12,6 +12,7 @@ export interface GitHubItemLink {
   issueNumber: number;
   externalId: string;
   lastMirroredAt?: string;
+  lastReconciledAt?: string;
 }
 
 export interface GitHubItemLinkStore {

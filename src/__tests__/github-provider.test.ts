@@ -1033,22 +1033,25 @@ describe("local provider state persistence", () => {
       comments: [],
     });
     expect(listCommentsCalls).toEqual([2]);
-    expect(secondProvider.getState().itemLinks).toEqual([
-      {
-        bindingId: createIntegrationBindingId("binding-1"),
-        taskId: createTaskId("github:evcraddock/todu-github-plugin#1"),
-        issueNumber: 1,
-        externalId: "evcraddock/todu-github-plugin#1",
-        lastMirroredAt: "2026-03-10T00:00:00.000Z",
-      },
-      {
-        bindingId: createIntegrationBindingId("binding-1"),
-        taskId: createTaskId("github:evcraddock/todu-github-plugin#2"),
-        issueNumber: 2,
-        externalId: "evcraddock/todu-github-plugin#2",
-        lastMirroredAt: expect.any(String),
-      },
-    ]);
+    expect(secondProvider.getState().itemLinks).toHaveLength(2);
+    expect(secondProvider.getState().itemLinks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          bindingId: createIntegrationBindingId("binding-1"),
+          taskId: createTaskId("github:evcraddock/todu-github-plugin#1"),
+          issueNumber: 1,
+          externalId: "evcraddock/todu-github-plugin#1",
+          lastMirroredAt: "2026-03-10T00:00:00.000Z",
+        }),
+        expect.objectContaining({
+          bindingId: createIntegrationBindingId("binding-1"),
+          taskId: createTaskId("github:evcraddock/todu-github-plugin#2"),
+          issueNumber: 2,
+          externalId: "evcraddock/todu-github-plugin#2",
+          lastMirroredAt: expect.any(String),
+        }),
+      ])
+    );
     expect(secondProvider.getState().commentLinks).toEqual([
       {
         bindingId: createIntegrationBindingId("binding-1"),
@@ -2849,6 +2852,121 @@ describe("incremental sync", () => {
       expect(linkStore.getByIssueNumber(binding.id, 1)?.lastMirroredAt).toBe(
         "2026-03-10T00:02:00.000Z"
       );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reconciles linked issues when the pull cursor skipped a remote update", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-03-10T00:01:00.000Z"));
+
+      const issueClient = createInMemoryGitHubIssueClient();
+      issueClient.seedIssues(repositoryTarget(), [
+        createIssue({
+          number: 1,
+          title: "Remote close can be missed",
+          state: "open",
+          labels: ["status:active"],
+          updatedAt: "2026-03-10T00:00:00.000Z",
+        }),
+      ]);
+
+      const binding = createBinding();
+      const linkStore = createInMemoryGitHubItemLinkStore();
+      const runtimeStore = createInMemoryBindingRuntimeStore();
+      const provider = createGitHubSyncProvider({ issueClient, linkStore, runtimeStore });
+      await provider.initialize({ settings: { token: "secret-token" } });
+
+      const firstPull = await provider.pull(binding, createProject());
+      expect(firstPull.tasks).toHaveLength(1);
+
+      issueClient.seedIssues(repositoryTarget(), [
+        createIssue({
+          number: 1,
+          title: "Remote close can be missed",
+          state: "closed",
+          labels: ["status:done"],
+          updatedAt: "2026-03-10T00:02:00.000Z",
+        }),
+      ]);
+
+      const previousState = runtimeStore.get(binding.id);
+      expect(previousState).not.toBeNull();
+      runtimeStore.save({
+        ...previousState!,
+        cursor: "2026-03-10T00:03:00.000Z",
+      });
+
+      vi.setSystemTime(new Date("2026-03-10T00:04:00.000Z"));
+      const secondPull = await provider.pull(binding, createProject());
+
+      expect(secondPull.tasks).toEqual([
+        expect.objectContaining({
+          externalId: "evcraddock/todu-github-plugin#1",
+          status: "done",
+          updatedAt: "2026-03-10T00:02:00.000Z",
+        }),
+      ]);
+      expect(linkStore.getByIssueNumber(binding.id, 1)).toMatchObject({
+        lastMirroredAt: "2026-03-10T00:02:00.000Z",
+        lastReconciledAt: "2026-03-10T00:04:00.000Z",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("throttles unchanged linked issue checks and periodically re-delivers checked state", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-03-10T00:01:00.000Z"));
+
+      const issueClient = createInMemoryGitHubIssueClient();
+      issueClient.seedIssues(repositoryTarget(), [
+        createIssue({
+          number: 1,
+          title: "Stable linked issue",
+          state: "open",
+          labels: ["status:active"],
+          updatedAt: "2026-03-10T00:00:00.000Z",
+        }),
+      ]);
+
+      const binding = createBinding();
+      const linkStore = createInMemoryGitHubItemLinkStore();
+      const provider = createGitHubSyncProvider({ issueClient, linkStore });
+      await provider.initialize({ settings: { token: "secret-token" } });
+
+      await provider.pull(binding, createProject());
+
+      let getIssueCalls = 0;
+      const originalGetIssue = issueClient.getIssue.bind(issueClient);
+      issueClient.getIssue = async (target, issueNumber) => {
+        getIssueCalls += 1;
+        return originalGetIssue(target, issueNumber);
+      };
+
+      vi.setSystemTime(new Date("2026-03-10T00:02:00.000Z"));
+      const secondPull = await provider.pull(binding, createProject());
+      expect(secondPull.tasks).toHaveLength(0);
+      expect(getIssueCalls).toBe(1);
+
+      vi.setSystemTime(new Date("2026-03-10T00:03:00.000Z"));
+      const thirdPull = await provider.pull(binding, createProject());
+      expect(thirdPull.tasks).toHaveLength(0);
+      expect(getIssueCalls).toBe(1);
+
+      vi.setSystemTime(new Date("2026-03-10T01:02:00.000Z"));
+      const fourthPull = await provider.pull(binding, createProject());
+      expect(fourthPull.tasks).toEqual([
+        expect.objectContaining({
+          externalId: "evcraddock/todu-github-plugin#1",
+          status: "active",
+        }),
+      ]);
+      expect(getIssueCalls).toBe(2);
     } finally {
       vi.useRealTimers();
     }
