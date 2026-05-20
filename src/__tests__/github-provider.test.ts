@@ -2346,7 +2346,7 @@ describe("multi-cycle steady-state sync", () => {
   it("pull then push then pull again produces consistent state", async () => {
     vi.useFakeTimers();
     try {
-      vi.setSystemTime(new Date("2026-03-10T00:00:00.000Z"));
+      vi.setSystemTime(new Date("2026-03-10T00:00:01.000Z"));
 
       const issueClient = createInMemoryGitHubIssueClient();
       issueClient.seedIssues(repositoryTarget(), [
@@ -2725,7 +2725,7 @@ describe("incremental sync", () => {
     expect(listCommentsCalls).toEqual([2]);
     expect(secondPull.tasks).toHaveLength(1);
     expect(secondPull.tasks[0].title).toBe("Changed issue");
-    // The existing comment on issue #2 was created before lastSuccessAt, so since-filtering
+    // The existing comment on issue #2 was created before the pull cursor, so since-filtering
     // excludes it — only genuinely new/updated comments are returned
     expect(secondPull.comments).toHaveLength(0);
   });
@@ -2775,7 +2775,86 @@ describe("incremental sync", () => {
     expect(listCommentsCalls).toEqual([]);
   });
 
-  it("passes lastSuccessAt as since to listComments on subsequent pull", async () => {
+  it("does not let push success advance the pull cursor past remote updates", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-03-10T00:01:00.000Z"));
+
+      const issueClient = createInMemoryGitHubIssueClient();
+      issueClient.seedIssues(repositoryTarget(), [
+        createIssue({
+          number: 1,
+          title: "Remote closes later",
+          state: "open",
+          labels: ["status:active"],
+          updatedAt: "2026-03-10T00:00:00.000Z",
+        }),
+      ]);
+
+      const binding = createBinding();
+      const linkStore = createInMemoryGitHubItemLinkStore();
+      const runtimeStore = createInMemoryBindingRuntimeStore();
+      const provider = createGitHubSyncProvider({ issueClient, linkStore, runtimeStore });
+      const listIssuesSinceValues: Array<string | undefined> = [];
+      const originalListIssues = issueClient.listIssues.bind(issueClient);
+      issueClient.listIssues = async (target, options) => {
+        listIssuesSinceValues.push(options?.since);
+        return originalListIssues(target, options);
+      };
+
+      await provider.initialize({ settings: { token: "secret-token" } });
+
+      const firstPull = await provider.pull(binding, createProject());
+      expect(firstPull.tasks).toHaveLength(1);
+      const pullCursor = runtimeStore.get(binding.id)?.cursor;
+      expect(pullCursor).toBe("2026-03-10T00:01:00.000Z");
+
+      issueClient.seedIssues(repositoryTarget(), [
+        createIssue({
+          number: 1,
+          title: "Remote closes later",
+          state: "closed",
+          labels: ["status:done"],
+          updatedAt: "2026-03-10T00:02:00.000Z",
+        }),
+      ]);
+
+      vi.setSystemTime(new Date("2026-03-10T00:03:00.000Z"));
+      await provider.push(
+        binding,
+        [
+          createTaskWithDetail({
+            id: "github:evcraddock/todu-github-plugin#1",
+            title: "Remote closes later",
+            status: "active",
+            updatedAt: "2026-03-10T00:00:00.000Z",
+          }),
+        ],
+        createProject()
+      );
+
+      expect(runtimeStore.get(binding.id)?.cursor).toBe(pullCursor);
+
+      vi.setSystemTime(new Date("2026-03-10T00:04:00.000Z"));
+      const secondPull = await provider.pull(binding, createProject());
+
+      expect(listIssuesSinceValues).toEqual([undefined, "2026-03-10T00:01:00.000Z"]);
+      expect(secondPull.tasks).toEqual([
+        expect.objectContaining({
+          externalId: "evcraddock/todu-github-plugin#1",
+          status: "done",
+          updatedAt: "2026-03-10T00:02:00.000Z",
+        }),
+      ]);
+      expect(linkStore.getByIssueNumber(binding.id, 1)?.lastMirroredAt).toBe(
+        "2026-03-10T00:02:00.000Z"
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("passes the pull cursor as since to listComments on subsequent pull", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
     issueClient.seedIssues(repositoryTarget(), [
       createIssue({
@@ -2817,8 +2896,8 @@ describe("incremental sync", () => {
       return originalListComments(target, issueNumber, options);
     };
 
-    const previousLastSuccessAt = runtimeStore.get(createBinding().id)?.lastSuccessAt;
-    expect(previousLastSuccessAt).toBeTruthy();
+    const previousPullCursor = runtimeStore.get(createBinding().id)?.cursor;
+    expect(previousPullCursor).toBeTruthy();
 
     // Issue changes so it appears in next pull
     issueClient.seedIssues(repositoryTarget(), [
@@ -2835,7 +2914,7 @@ describe("incremental sync", () => {
 
     expect(capturedOptions).toHaveLength(1);
     expect(capturedOptions[0].since).toBeTruthy();
-    expect(capturedOptions[0].since).toBe(previousLastSuccessAt);
+    expect(capturedOptions[0].since).toBe(previousPullCursor);
   });
 
   it("pulls all issues after a failed cycle resets since", async () => {
@@ -2870,7 +2949,7 @@ describe("incremental sync", () => {
 
     await provider.initialize({ settings: { token: "secret-token" } });
 
-    // First pull succeeds, sets lastSuccessAt
+    // First pull succeeds and sets the pull cursor
     const firstPull = await provider.pull(createBinding(), createProject());
     expect(firstPull.tasks).toHaveLength(1);
 
@@ -2878,7 +2957,7 @@ describe("incremental sync", () => {
     shouldFail = true;
     await expect(provider.pull(createBinding(), createProject())).rejects.toThrow();
 
-    // Failure doesn't update lastSuccessAt, so next pull still uses the old timestamp
+    // Failure doesn't update the pull cursor, so next pull still uses the old timestamp
     shouldFail = false;
     const thirdPull = await provider.pull(createBinding(), createProject());
     // Issue hasn't changed since first success, so incremental returns nothing

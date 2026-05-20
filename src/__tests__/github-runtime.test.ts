@@ -10,7 +10,10 @@ import {
   createFileBindingRuntimeStore,
   createInMemoryBindingRuntimeStore,
   createInitialRuntimeState,
+  getPullSince,
   recordFailure,
+  recordPullSuccess,
+  recordPushSuccess,
   recordSuccess,
   shouldRetry,
   type RetryConfig,
@@ -80,6 +83,47 @@ describe("recordSuccess", () => {
   it("preserves binding identity", () => {
     const state = recordSuccess(createInitialRuntimeState(BINDING_ID), null);
     expect(state.bindingId).toBe(BINDING_ID);
+  });
+});
+
+describe("pull cursor helpers", () => {
+  it("uses the dedicated pull cursor before the legacy success timestamp", () => {
+    const legacyState = recordSuccess(
+      createInitialRuntimeState(BINDING_ID),
+      null,
+      new Date("2026-03-10T12:00:00.000Z")
+    );
+    const pullState = recordPullSuccess(
+      legacyState,
+      new Date("2026-03-10T12:05:00.000Z"),
+      new Date("2026-03-10T12:06:00.000Z")
+    );
+
+    expect(getPullSince(legacyState)).toBe("2026-03-10T12:00:00.000Z");
+    expect(getPullSince(pullState)).toBe("2026-03-10T12:05:00.000Z");
+    expect(pullState.lastSuccessAt).toBe("2026-03-10T12:06:00.000Z");
+  });
+
+  it("resets push retry state without advancing the pull cursor", () => {
+    const pullState = recordPullSuccess(
+      createInitialRuntimeState(BINDING_ID),
+      new Date("2026-03-10T12:05:00.000Z"),
+      new Date("2026-03-10T12:06:00.000Z")
+    );
+    const failedState = recordFailure(
+      pullState,
+      "network error",
+      undefined,
+      new Date("2026-03-10T12:07:00.000Z")
+    );
+    const pushState = recordPushSuccess(failedState, new Date("2026-03-10T12:10:00.000Z"));
+
+    expect(pushState.retryAttempt).toBe(0);
+    expect(pushState.nextRetryAt).toBeNull();
+    expect(pushState.lastError).toBeNull();
+    expect(pushState.cursor).toBe("2026-03-10T12:05:00.000Z");
+    expect(pushState.lastSuccessAt).toBe("2026-03-10T12:06:00.000Z");
+    expect(pushState.lastAttemptAt).toBe("2026-03-10T12:10:00.000Z");
   });
 });
 

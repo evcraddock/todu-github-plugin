@@ -62,8 +62,10 @@ import {
   createFileBindingRuntimeStore,
   createInMemoryBindingRuntimeStore,
   createInitialRuntimeState,
+  getPullSince,
   recordFailure,
-  recordSuccess,
+  recordPullSuccess,
+  recordPushSuccess,
   shouldRetry,
   type BindingRuntimeStore,
   type RetryConfig,
@@ -291,6 +293,8 @@ export function createGitHubSyncProvider(
       logger.info("pull started", logContext);
 
       try {
+        const pullStartedAt = new Date();
+        const pullSince = getPullSince(runtimeState);
         loopPreventionStore.clearExpired(DEFAULT_LOOP_PREVENTION_MAX_AGE_MS);
 
         lastPullResult = await bootstrapGitHubIssuesToTasks({
@@ -299,9 +303,8 @@ export function createGitHubSyncProvider(
           repo: parsedBinding.repo,
           issueClient,
           linkStore,
-          since: runtimeState.lastSuccessAt ?? undefined,
-          importClosedOnBootstrap:
-            runtimeState.lastSuccessAt == null && isImportClosedOnBootstrapEnabled(binding),
+          since: pullSince,
+          importClosedOnBootstrap: pullSince == null && isImportClosedOnBootstrapEnabled(binding),
         });
 
         const pullCommentsResult = await pullComments({
@@ -312,10 +315,10 @@ export function createGitHubSyncProvider(
           itemLinkStore: linkStore,
           commentLinkStore,
           issueNumbers: lastPullResult.touchedIssueNumbers,
-          since: runtimeState.lastSuccessAt ?? undefined,
+          since: pullSince,
         });
 
-        const updatedRuntimeState = recordSuccess(runtimeState, null);
+        const updatedRuntimeState = recordPullSuccess(runtimeState, pullStartedAt);
         runtimeStore.save(updatedRuntimeState);
         bindingStatuses.set(
           binding.id,
@@ -435,7 +438,7 @@ export function createGitHubSyncProvider(
           );
         }
 
-        const updatedRuntimeState = recordSuccess(runtimeState, null);
+        const updatedRuntimeState = recordPushSuccess(runtimeState);
         runtimeStore.save(updatedRuntimeState);
         bindingStatuses.set(
           binding.id,
