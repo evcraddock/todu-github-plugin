@@ -256,14 +256,23 @@ export async function pushComments(input: {
     }
 
     const externalTaskId = String(task.localTaskId);
-    const taskNotes = input.loadTaskNotes ? await input.loadTaskNotes(task.localTaskId) : [];
-    const noteTagsById = new Map(taskNotes.map((note) => [String(note.id), note.tags]));
     const currentNoteIds = new Set(task.comments.map((comment) => String(comment.localNoteId)));
-
-    for (const existingCommentLink of input.commentLinkStore.listByIssue(
+    const existingCommentLinks = input.commentLinkStore.listByIssue(
       input.binding.id,
       itemLink.issueNumber
-    )) {
+    );
+    let noteTagsById: Map<string, string[]> | null = null;
+    const loadNoteTagsForTask = async (): Promise<Map<string, string[]>> => {
+      if (noteTagsById) {
+        return noteTagsById;
+      }
+
+      const taskNotes = input.loadTaskNotes ? await input.loadTaskNotes(task.localTaskId) : [];
+      noteTagsById = new Map(taskNotes.map((note) => [String(note.id), note.tags]));
+      return noteTagsById;
+    };
+
+    for (const existingCommentLink of existingCommentLinks) {
       if (currentNoteIds.has(String(existingCommentLink.noteId))) {
         continue;
       }
@@ -273,9 +282,18 @@ export async function pushComments(input: {
     }
 
     for (const comment of task.comments) {
+      const commentTags = (comment as { tags?: unknown }).tags;
+      const shouldLoadTags = shouldLoadNoteTagsForComment({
+        comment,
+        commentTags,
+        existingCommentLinks,
+      });
+      const loadedTags = shouldLoadTags
+        ? (await loadNoteTagsForTask()).get(String(comment.localNoteId))
+        : undefined;
       const commentWithTags = {
         ...comment,
-        tags: noteTagsById.get(String(comment.localNoteId)) ?? (comment as { tags?: unknown }).tags,
+        tags: loadedTags ?? commentTags,
       };
       const existingLink = resolveCommentLinkForPush({
         binding: input.binding,
@@ -323,6 +341,28 @@ export async function pushComments(input: {
   }
 
   return { commentLinks, createdComments, updatedComments };
+}
+
+function shouldLoadNoteTagsForComment(input: {
+  comment: ExportedCommentInput;
+  commentTags: unknown;
+  existingCommentLinks: GitHubCommentLink[];
+}): boolean {
+  if (getSyncExternalCommentIdFromTags(input.commentTags) !== null) {
+    return false;
+  }
+
+  const existingLink = input.existingCommentLinks.find(
+    (link) => link.noteId === input.comment.localNoteId
+  );
+  if (!existingLink) {
+    return true;
+  }
+
+  return input.existingCommentLinks.some(
+    (link) =>
+      link.noteId !== input.comment.localNoteId && String(link.noteId).startsWith("external:")
+  );
 }
 
 async function updateGitHubCommentIfNeeded(

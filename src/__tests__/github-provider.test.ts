@@ -1202,6 +1202,198 @@ describe("comment sync", () => {
     expect(issueClient.snapshotComments(repositoryTarget(), 1)).toHaveLength(1);
   });
 
+  it("does not load task notes when linked tasks have no comments", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Issue without comments",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+      }),
+    ]);
+
+    const binding = createBinding();
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    linkStore.save(
+      createLinkFromTask(
+        binding,
+        createTaskId("task-1"),
+        "evcraddock",
+        "todu-github-plugin",
+        1,
+        "2026-03-10T02:00:00.000Z"
+      )
+    );
+
+    let loadTaskNotesCalls = 0;
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore,
+      loadTaskNotes: async () => {
+        loadTaskNotesCalls += 1;
+        return [];
+      },
+    });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await provider.push(
+      binding,
+      [
+        createTaskWithDetail({
+          id: "task-1",
+          title: "Issue without comments",
+          status: "active",
+          comments: [],
+          updatedAt: "2026-03-10T01:00:00.000Z",
+        }),
+      ],
+      createProject()
+    );
+
+    expect(loadTaskNotesCalls).toBe(0);
+  });
+
+  it("does not load task notes when all comments already have links", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Issue with linked comment",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 1, [
+      createGitHubComment({
+        id: 100,
+        issueNumber: 1,
+        body: "Already mirrored",
+        author: "octocat",
+        createdAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const binding = createBinding();
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const commentLinkStore = createInMemoryGitHubCommentLinkStore();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+    commentLinkStore.save({
+      bindingId: binding.id,
+      taskId: createTaskId("task-1"),
+      noteId: createNoteId("note-1"),
+      issueNumber: 1,
+      githubCommentId: 100,
+      lastMirroredAt: "2026-03-10T00:00:00.000Z",
+    });
+
+    let loadTaskNotesCalls = 0;
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore,
+      commentLinkStore,
+      loadTaskNotes: async () => {
+        loadTaskNotesCalls += 1;
+        return [];
+      },
+    });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    await provider.push(
+      binding,
+      [
+        createTaskWithDetail({
+          id: "task-1",
+          title: "Issue with linked comment",
+          status: "active",
+          comments: [
+            createNote({
+              id: "note-1",
+              content: "Already mirrored",
+              author: "octocat",
+              createdAt: "2026-03-10T00:00:00.000Z",
+            }),
+          ],
+        }),
+      ],
+      createProject()
+    );
+
+    expect(loadTaskNotesCalls).toBe(0);
+    expect(issueClient.snapshotComments(repositoryTarget(), 1)).toHaveLength(1);
+  });
+
+  it("loads task notes for commented tasks so sync tags prevent imported comment echoes", async () => {
+    const issueClient = createInMemoryGitHubIssueClient();
+    issueClient.seedIssues(repositoryTarget(), [
+      createIssue({
+        number: 1,
+        title: "Issue with imported comment tags",
+        state: "open",
+        labels: ["status:active", "priority:medium"],
+      }),
+    ]);
+    issueClient.seedComments(repositoryTarget(), 1, [
+      createGitHubComment({
+        id: 100,
+        issueNumber: 1,
+        body: "Imported from GitHub",
+        author: "octocat",
+        createdAt: "2026-03-10T00:00:00.000Z",
+      }),
+    ]);
+
+    const binding = createBinding();
+    const linkStore = createInMemoryGitHubItemLinkStore();
+    const commentLinkStore = createInMemoryGitHubCommentLinkStore();
+    linkStore.save(
+      createLinkFromTask(binding, createTaskId("task-1"), "evcraddock", "todu-github-plugin", 1)
+    );
+
+    let loadTaskNotesCalls = 0;
+    const provider = createGitHubSyncProvider({
+      issueClient,
+      linkStore,
+      commentLinkStore,
+      loadTaskNotes: async () => {
+        loadTaskNotesCalls += 1;
+        return [{ id: "note-1", tags: ["sync:externalId:100"] }];
+      },
+    });
+    await provider.initialize({ settings: { token: "secret-token" } });
+
+    const result = await provider.push(
+      binding,
+      [
+        createTaskWithDetail({
+          id: "task-1",
+          title: "Issue with imported comment tags",
+          status: "active",
+          comments: [
+            createNote({
+              id: "note-1",
+              content: "Imported from GitHub",
+              author: "octocat",
+              createdAt: "2026-03-10T00:00:00.000Z",
+            }),
+          ],
+        }),
+      ],
+      createProject()
+    );
+
+    expect(loadTaskNotesCalls).toBe(1);
+    expect(result.commentLinks).toEqual([
+      expect.objectContaining({
+        localNoteId: createNoteId("note-1"),
+        externalCommentId: "100",
+      }),
+    ]);
+    expect(issueClient.snapshotComments(repositoryTarget(), 1)).toHaveLength(1);
+  });
+
   it("repairs stale local comment links by trusting the note sync tag", async () => {
     const issueClient = createInMemoryGitHubIssueClient();
     issueClient.seedIssues(repositoryTarget(), [
