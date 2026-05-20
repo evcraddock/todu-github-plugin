@@ -81,6 +81,35 @@ export function recordSuccess(
   };
 }
 
+// The runtime cursor is the pull cursor used for GitHub `since` filtering.
+// It advances to the start of a successful pull so updates that happen while a
+// pull/push cycle is still running are fetched by the next incremental pull.
+export function getPullSince(state: BindingRuntimeState): string | undefined {
+  return state.cursor ?? state.lastSuccessAt ?? undefined;
+}
+
+export function recordPullSuccess(
+  state: BindingRuntimeState,
+  pullStartedAt: Date,
+  now: Date = new Date()
+): BindingRuntimeState {
+  return recordSuccess(state, pullStartedAt.toISOString(), now);
+}
+
+// Push success clears retry state but does not advance the pull cursor.
+export function recordPushSuccess(
+  state: BindingRuntimeState,
+  now: Date = new Date()
+): BindingRuntimeState {
+  return {
+    ...state,
+    retryAttempt: 0,
+    nextRetryAt: null,
+    lastError: null,
+    lastAttemptAt: now.toISOString(),
+  };
+}
+
 export function recordFailure(
   state: BindingRuntimeState,
   error: string,
